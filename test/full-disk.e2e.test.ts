@@ -63,6 +63,30 @@ exec ${which("tar")} "$@"
 `,
   { mode: 0o755 },
 )
+/**
+ * `df -Pk` as the archive script's stage picker (gitFirst.ts stageBaseScript) sees it: for a path under
+ * $FAKE_FULL_ROOT, report 0 available, matching the box's simulated ENOSPC; for any other path (/tmp, the box's
+ * own staging dir once it's outside the full root), delegate to the real df so the picker always steers the stage
+ * away from the full box regardless of how much space the host actually has free.
+ */
+fs.writeFileSync(
+  path.join(SHIMS, "df"),
+  `#!/bin/bash
+if [ -n "$FAKE_FULL_ROOT" ]; then
+  for a in "$@"; do
+    case "$a" in -*) continue;; esac
+    d=$(cd "$a" 2>/dev/null && pwd)
+    case "\${d:-$a}/" in "$FAKE_FULL_ROOT"/*)
+      printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n'
+      printf 'fakefs 1 1 0 100%% %s\\n' "$a"
+      exit 0;;
+    esac
+  done
+fi
+exec ${which("df")} "$@"
+`,
+  { mode: 0o755 },
+)
 
 /** Disk a folder uses; a `*.ballast` file counts as the byte size written in it. */
 function used(file: string): number {
@@ -238,6 +262,19 @@ const repoState = (work: string) => ({
 })
 
 describe("archiving on a full disk", () => {
+  it("the df shim reports 0 available under the fake full root, and real space elsewhere", () => {
+    const fakeRoot = tmpDir("fake-full-root-")
+    const runDf = (dir: string, fakeFullRoot: string) =>
+      execFileSync("bash", ["-c", "df -Pk \"$1\" | awk 'NR > 1 { print $4 }' | tail -n 1", "--", dir], { env: { ...env, PATH: `${SHIMS}:${env.PATH}`, FAKE_FULL_ROOT: fakeFullRoot } })
+        .toString()
+        .trim()
+    // A path under the simulated full box reports 0 KB available.
+    expect(runDf(fakeRoot, fakeRoot)).toBe("0")
+    expect(runDf(path.join(fakeRoot, "nested", "stage"), fakeRoot)).toBe("0")
+    // /tmp, outside the fake full root, still reports the host's real (nonzero) free space.
+    expect(Number(runDf("/tmp", fakeRoot))).toBeGreaterThan(0)
+  })
+
   it("streams the archive off a box with 0 bytes free, too-big fallback included, and the resize goes through", async () => {
     const r = await start({ archiveMaxMb: 1 })
     const p = await repoProject(r, "alpha")
