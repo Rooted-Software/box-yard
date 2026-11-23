@@ -92,7 +92,7 @@ import { NO_SESSION_CONNECTORS, type SessionConnectors } from "./connectors/sess
 import type { SessionRef } from "./connectors/connectors.js"
 import { claudeLoginRef, codexLoginRef, limitsOf, recordLimits, type LoginRef } from "./loginLimits.js"
 import { authorEnv, chooseAuthor, fallbackWarning, GithubAuthors, hostGitScript, parseHostGit, readHostGit, recordAuthorSource, type HostGit, type TurnAuthor } from "./gitAuthor.js"
-import { AGENT_CLI_LABEL, DEFAULT_CODEX_EFFORT, canSteer, cliForModel, codexModel, cursorModel, isOpenCodeModel, isCursorOnlyModel, isOpenAiModel, pinProblem, type AgentCli } from "../shared/agentCli.js"
+import { AGENT_CLI_LABEL, DEFAULT_CODEX_EFFORT, canSteer, cliForModel, codexModel, cursorModel, isOpenCodeModel, isCursorOnlyModel, isOpenAiModel, pinProblem, resolveCursorModel, type AgentCli } from "../shared/agentCli.js"
 import { CursorModels } from "./cursor.js"
 import type { Identities, TurnSigning } from "./identity/identities.js"
 import type { AgentLogins, PickedLogin } from "./agentLogins.js"
@@ -6678,10 +6678,11 @@ export class TaskManager {
       return { model, effort: null, autocompact: null, route }
     }
     if (cursor) {
-      // A task pin is an exact CLI request, even when the server's cached catalog doesn't know it. Only inherited
-      // routes may give way to Settings (e.g. a shared Claude alias). The runner CLI accepts or rejects the pin;
-      // replacing it here would silently run another model on both first and resumed turns.
-      const model = route.modelFrom === "task" ? route.model : cursorModel(route.modelFrom === "builtin" ? null : route.model, s.agentCursorModel, (id) => this.cursorModels.has(id))
+      // A concrete task pin is an exact CLI request, even when the server's cached catalog doesn't know it. Only
+      // inherited routes may give way to Settings (e.g. a shared Claude alias). A stored family alias (sol:latest)
+      // stays on the task; the launch id is the newest match in the list held now.
+      const picked = route.modelFrom === "task" ? route.model : cursorModel(route.modelFrom === "builtin" ? null : route.model, s.agentCursorModel, (id) => this.cursorModels.has(id))
+      const model = resolveCursorModel(picked, this.cursorModels.peek().models)
       return { model, effort: null, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window), route }
     }
     // Codex runs OpenAI models: a Claude model from Settings, routing or the built-in default gives way to the Codex model.
@@ -8384,10 +8385,11 @@ export class TaskManager {
     const n = created.length
     this.addEvent(parent.id, `Started ${n} sub-task${n === 1 ? "" : "s"}.`, { kind: "subtasks", subtasks: created.map((t) => ({ id: t.id, title: t.title })) })
     this.emitTask(parent.id)
+    // subtasks.json lists them before the runner hears they started: a wait_for_subtasks or finish right after reads it.
+    await this.flushSubtasks(parent.id)
     // One that asked for its own agent, model or effort says what it got, so the agent can check it.
     const asked = (a: SubtaskAsk) => Boolean(a.agent || a.model || a.effort)
     await reply({ status: "ok", tasks: created.map((t, i) => ({ id: t.id, title: t.title, url: this.absoluteUrl(`/tasks/${t.id}`), runsOn: asks[i]!.runsOn, ...(asked(asks[i]!) ? { runsWith: pinsLabel(pins[i]!) } : {}) })) })
-    this.syncSubtasks(parent.id)
   }
 
   /**
@@ -8501,17 +8503,22 @@ export class TaskManager {
    */
   private syncSubtasks(parentId: string) {
     if (this.stopped || this.subtaskSyncs.has(parentId)) return
-    const timer = setTimeout(() => {
-      this.subtaskSyncs.delete(parentId)
-      const prev = this.subtaskWrites.get(parentId) ?? Promise.resolve()
-      const next = prev.then(() => this.writeSubtasksFile(parentId)).catch((err) => console.warn(`[box-yard] subtasks.json for ${parentId}: ${errorMessage(err)}`))
-      this.subtaskWrites.set(parentId, next)
-      void next.finally(() => {
-        if (this.subtaskWrites.get(parentId) === next) this.subtaskWrites.delete(parentId)
-      })
-    }, 100)
+    const timer = setTimeout(() => void this.flushSubtasks(parentId), 100)
     timer.unref?.()
     this.subtaskSyncs.set(parentId, timer)
+  }
+
+  /** Write subtasks.json now, after any write already under way, in place of a debounced one still to come. Never rejects. */
+  private flushSubtasks(parentId: string): Promise<void> {
+    clearTimeout(this.subtaskSyncs.get(parentId))
+    this.subtaskSyncs.delete(parentId)
+    const prev = this.subtaskWrites.get(parentId) ?? Promise.resolve()
+    const next = prev.then(() => this.writeSubtasksFile(parentId)).catch((err) => console.warn(`[box-yard] subtasks.json for ${parentId}: ${errorMessage(err)}`))
+    this.subtaskWrites.set(parentId, next)
+    void next.finally(() => {
+      if (this.subtaskWrites.get(parentId) === next) this.subtaskWrites.delete(parentId)
+    })
+    return next
   }
 
   private async writeSubtasksFile(parentId: string) {

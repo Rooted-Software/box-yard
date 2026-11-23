@@ -99,6 +99,9 @@ describe("more Claude logins", () => {
 
   it("hand new task sessions and Coordinator runs the next login, round robin", async () => {
     const r = await start("oat-global-0001")
+    // Captains share the rotation too (docs/logins.md), and each task's finish notice nudges this project's Captain
+    // awake. Hold its wake off so the fixture's own turns are the only ones claiming logins, deterministically.
+    r.yard.captains.tuning.wakeDebounceMs = r.yard.captains.tuning.wakeQuietMs = 10 * 60_000
     await r.call("POST", "/api/logins", { harness: "claude", label: "A", value: "oat-a-0002" })
     await r.call("POST", "/api/logins", { harness: "claude", label: "B", value: "oat-b-0003" })
     const project = await r.call<Project>("POST", "/api/projects", { name: "app" })

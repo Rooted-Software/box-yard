@@ -22,6 +22,9 @@ const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_VERSION", "FAKE_CLAUDE_UNKNOWN
 async function start(): Promise<Running> {
   const port = await freePort()
   const yard = createBoxYard(testConfig({ port }), { webDir: "/nonexistent" })
+  // Suppress the project's automatic Captain wake-ups: they'd run their own fake-claude turns and inflate turnLog,
+  // which this suite uses to count worker turns only.
+  yard.captains.tuning.wakeDebounceMs = yard.captains.tuning.wakeQuietMs = 10 * 60_000
   const server = await new Promise<Server>((resolve) => {
     const s = yard.app.listen(port, "127.0.0.1", () => resolve(s))
   })
