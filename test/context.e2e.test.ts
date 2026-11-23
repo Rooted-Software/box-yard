@@ -346,15 +346,22 @@ describe("orchestrator usage, compaction and the durable log", () => {
     expect(JSON.parse(found.content[0]!.text).orchestratorCompactions[0].id).toBe(apiList[0]!.id)
     const read = (await client.callTool({ name: "read_compaction", arguments: { compaction: apiList[0]!.id } })) as { content: { text: string }[] }
     expect(JSON.parse(read.content[0]!.text).markdown).toContain("## Open threads and next steps")
-    const order = lines().map((l) => l.prompt)
+    const allLines = lines()
+    const order = allLines.map((l) => l.prompt)
     const si = order.findIndex((x) => x.includes("Your context is about to be compacted"))
     const ci = order.findIndex((x) => x.startsWith("/compact "))
     expect(si).toBeGreaterThan(0)
     expect(ci).toBeGreaterThan(si)
     // The summary and /compact passes send the turn's tools, system prompt and effort, so they hit its prompt
-    // cache; only a turn may use the tools (no allow rules: dontAsk denies every call).
-    const turnArgs = lines()[si - 1]!.args
-    for (const pass of [lines()[si]!.args, lines()[ci]!.args]) {
+    // cache; only a turn may use the tools (no allow rules: dontAsk denies every call). Find the Coordinator
+    // turn right before the summary pass by its own fixture MCP config: a Captain's turn can interleave.
+    const orchestratorMcpConfig = path.join(r.config.dataDir, "orchestrator-mcp.json")
+    const isCoordinatorTurn = (l: { args: string[] }) => l.args.includes("--mcp-config") && argOf(l.args, "--mcp-config") === orchestratorMcpConfig
+    let ti = si - 1
+    while (ti >= 0 && !isCoordinatorTurn(allLines[ti]!)) ti--
+    expect(ti).toBeGreaterThanOrEqual(0)
+    const turnArgs = allLines[ti]!.args
+    for (const pass of [allLines[si]!.args, allLines[ci]!.args]) {
       for (const flag of ["--mcp-config", "--tools", "--permission-mode", "--append-system-prompt", "--model", "--effort"]) expect(argOf(pass, flag), flag).toBe(argOf(turnArgs, flag))
       expect(pass).not.toContain("--allowedTools")
     }
