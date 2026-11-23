@@ -8385,10 +8385,11 @@ export class TaskManager {
     const n = created.length
     this.addEvent(parent.id, `Started ${n} sub-task${n === 1 ? "" : "s"}.`, { kind: "subtasks", subtasks: created.map((t) => ({ id: t.id, title: t.title })) })
     this.emitTask(parent.id)
+    // subtasks.json lists them before the runner hears they started: a wait_for_subtasks or finish right after reads it.
+    await this.flushSubtasks(parent.id)
     // One that asked for its own agent, model or effort says what it got, so the agent can check it.
     const asked = (a: SubtaskAsk) => Boolean(a.agent || a.model || a.effort)
     await reply({ status: "ok", tasks: created.map((t, i) => ({ id: t.id, title: t.title, url: this.absoluteUrl(`/tasks/${t.id}`), runsOn: asks[i]!.runsOn, ...(asked(asks[i]!) ? { runsWith: pinsLabel(pins[i]!) } : {}) })) })
-    this.syncSubtasks(parent.id)
   }
 
   /**
@@ -8502,17 +8503,22 @@ export class TaskManager {
    */
   private syncSubtasks(parentId: string) {
     if (this.stopped || this.subtaskSyncs.has(parentId)) return
-    const timer = setTimeout(() => {
-      this.subtaskSyncs.delete(parentId)
-      const prev = this.subtaskWrites.get(parentId) ?? Promise.resolve()
-      const next = prev.then(() => this.writeSubtasksFile(parentId)).catch((err) => console.warn(`[box-yard] subtasks.json for ${parentId}: ${errorMessage(err)}`))
-      this.subtaskWrites.set(parentId, next)
-      void next.finally(() => {
-        if (this.subtaskWrites.get(parentId) === next) this.subtaskWrites.delete(parentId)
-      })
-    }, 100)
+    const timer = setTimeout(() => void this.flushSubtasks(parentId), 100)
     timer.unref?.()
     this.subtaskSyncs.set(parentId, timer)
+  }
+
+  /** Write subtasks.json now, after any write already under way, in place of a debounced one still to come. Never rejects. */
+  private flushSubtasks(parentId: string): Promise<void> {
+    clearTimeout(this.subtaskSyncs.get(parentId))
+    this.subtaskSyncs.delete(parentId)
+    const prev = this.subtaskWrites.get(parentId) ?? Promise.resolve()
+    const next = prev.then(() => this.writeSubtasksFile(parentId)).catch((err) => console.warn(`[box-yard] subtasks.json for ${parentId}: ${errorMessage(err)}`))
+    this.subtaskWrites.set(parentId, next)
+    void next.finally(() => {
+      if (this.subtaskWrites.get(parentId) === next) this.subtaskWrites.delete(parentId)
+    })
+    return next
   }
 
   private async writeSubtasksFile(parentId: string) {
