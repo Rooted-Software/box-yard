@@ -11,6 +11,11 @@ type Message = { id: string; createdAt: number; role?: string; meta?: Record<str
 /** The first message the server has: an optimistic send (`meta.pending`) has only a client id until it lands, so
  * "before" it means nothing to the server, which answers 400. Anchor earlier-history requests on this instead. */
 const firstSaved = <M extends Message>(list: M[]) => list.find((m) => !m.meta?.pending)
+/** The same for "after": the newest message the server has. */
+function lastSaved<M extends Message>(list: M[]) {
+  for (let i = list.length - 1; i >= 0; i--) if (!list[i]!.meta?.pending) return list[i]
+  return undefined
+}
 
 export type HistoryIndexState = { status: "loading" | "ready" | "error" | "unsupported"; retry: () => void }
 class HistoryUnavailable extends Error {}
@@ -137,7 +142,7 @@ export function useTranscriptHistory<M extends Message>(path: string, live: M[])
   }, [request])
   const later = useCallback(() => {
     const { page, items } = latest.current
-    const id = (page?.messages ?? items).at(-1)?.id
+    const id = lastSaved(page?.messages ?? items)?.id
     if (id) void request({ after: page?.positions?.[id] ?? id })
   }, [request])
   const toLatest = useCallback(() => {
