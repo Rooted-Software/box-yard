@@ -60,7 +60,8 @@ export async function closeFromOwnerChat(
   const add = (role: "user" | "assistant", text: string) => {
     // Results carry only title/id/state: even status-only Coordinator chats must not acquire task content here.
     if (chat.kind === "task") {
-      const message = store.addTaskMessage(chat.taskId, role === "assistant" ? "event" : role, text, meta)
+      // The client id lets the task page swap its optimistic copy for this one (submissionId), as tasks.send does.
+      const message = store.addTaskMessage(chat.taskId, role === "assistant" ? "event" : role, text, role === "user" && options.id ? { ...meta, clientMessageId: options.id } : meta)
       hub.broadcast({ type: "task.message", message })
       return message
     }

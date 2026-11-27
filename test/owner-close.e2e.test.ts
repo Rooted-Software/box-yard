@@ -117,7 +117,12 @@ describe("trusted owner close at HTTP ingress", () => {
     expect(r.y.store.listChat().at(-1)?.content).toContain("more than one")
     await r.request(`/projects/${r.a.id}/captain/messages`, { content: `close ${two.id}` })
     expect(r.y.store.listCaptainMessages(r.a.id).at(-1)?.content).toMatch(/^Out of scope/)
-    await r.request(`/tasks/${one.id}/messages`, { content: `close ${two.id}` })
+    const own = await r.request(`/tasks/${one.id}/messages`, { content: `close ${two.id}`, id: "chat_task0001" })
+    // Handled as an owner command without queueing: one stored request, matched to the client's optimistic copy.
+    expect(own.body).toMatchObject({ id: one.id, ownerCommand: true })
+    expect(own.body.inputId).toBeUndefined()
+    expect(r.y.store.listTaskMessages(one.id).filter((m) => m.role === "user")).toMatchObject([{ meta: { ownerAction: "close_task", clientMessageId: "chat_task0001" } }])
+    expect(r.y.store.listQueuedInputs(one.id)).toEqual([])
     await r.request("/chat", { content: `close ${two.id}`, project: r.a.id })
     expect(r.y.store.getTask(one.id)?.status).toBe("idle")
     expect(r.y.store.getTask(two.id)?.status).toBe("failed")
