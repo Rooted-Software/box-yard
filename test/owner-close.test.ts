@@ -123,6 +123,19 @@ describe("direct owner chat action", () => {
     expect(r.store.listChat().at(-1)?.content).toContain("already done")
   })
 
+  it("tags a task chat's stored request with its client id, so a close that doesn't close shows it once", async () => {
+    const r = setup()
+    const chat = { kind: "task", taskId: r.task.id, projectId: r.alpha.id } as const
+    const request = await closeFromOwnerChat(r.deps, chat, "close stale issues or ones that are either not needed or already fixed", { id: "chat_task0001" })
+    expect(r.closeTask).not.toHaveBeenCalled()
+    const messages = r.store.listTaskMessages(r.task.id)
+    expect(messages.filter((m) => m.role === "user")).toEqual([request])
+    expect(request).toMatchObject({ role: "user", meta: { ownerAction: "close_task", clientMessageId: "chat_task0001" } })
+    expect(messages.at(-1)).toMatchObject({ role: "event", content: expect.stringContaining("No exact task match") })
+    expect(messages.at(-1)?.meta?.clientMessageId).toBeUndefined()
+    expect(r.broadcast).toHaveBeenCalledWith({ type: "task.message", message: request })
+  })
+
   it("uses the normal close method and reports a guard failure without leaking its error", async () => {
     const r = setup()
     r.closeTask.mockRejectedValueOnce(new Error("PRIVATE-PROVIDER-ERROR"))

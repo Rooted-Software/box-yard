@@ -1477,8 +1477,9 @@ export function createBoxYard(
     if (!row) return void res.status(404).json({ error: "Task not found" })
     const files = withAttachments(body.content, body.attachments)
     // Owner-only action before requireRunner/sendInput: closing never starts a turn or needs a working runner.
-    if (await closeFromOwnerChat({ store, tasks, hub, authenticatedOwner: auth.enabled && auth.isAuthed(req) }, { kind: "task", taskId: row.id, projectId: row.project_id }, body.content, { attachments: files })) {
-      return void res.json(store.getTask(row.id))
+    if (await closeFromOwnerChat({ store, tasks, hub, authenticatedOwner: auth.enabled && auth.isAuthed(req) }, { kind: "task", taskId: row.id, projectId: row.project_id }, body.content, { id: body.id, attachments: files })) {
+      // ownerCommand: nothing was queued, so the client drops its pending copy for the stored one (closed or not).
+      return void res.json({ ...store.getTask(row.id), ownerCommand: true })
     }
     await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, { ...(row ? { agentCli: taskAgentCli(row) } : {}), machineLabel: body.machineLabel, gpu: body.gpu })
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn, body.machineLabel, body.gpu, body.boxSize)
