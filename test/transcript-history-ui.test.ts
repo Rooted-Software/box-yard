@@ -311,4 +311,16 @@ describe("bounded retained history", () => {
     expect(api).toHaveBeenLastCalledWith("/api/chat/history?before=m-1")
     expect(state.moreBefore).toBe(false)
   })
+
+  it("anchors newer history on the last saved message, not an optimistic one", async () => {
+    const pending = { ...item(2), id: "chat-client-1", meta: { pending: true } }
+    render(undefined, [pending]); await settle()
+    act(() => state.later()); await settle()
+    expect(vi.mocked(api).mock.calls.some(([path]) => String(path).includes("after="))).toBe(false)
+    vi.mocked(api).mockResolvedValueOnce({ messages: [], before: null, after: null } as never)
+    render(undefined, [item(1), pending]); await settle()
+    act(() => state.later()); await settle()
+    expect(api).toHaveBeenLastCalledWith("/api/chat/history?after=m-1")
+  })
 })
+
