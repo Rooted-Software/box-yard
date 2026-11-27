@@ -1305,7 +1305,9 @@ export function useSendTaskMessage(taskId: string, { quiet }: { quiet?: (err: Er
       playSendSound()
       // A newer SSE task (or another send/Stop) is authoritative over this response's snapshot.
       const current = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.id === destinationId)
-      if (!staleAfterStop(task) && current === ctx?.taskAtSend) qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
+      // inputId and ownerCommand describe this send only. Cached, they'd stand in for a later send's lost response.
+      const { inputId: _inputId, ownerCommand: _ownerCommand, ...snapshot } = task
+      if (!staleAfterStop(task) && current === ctx?.taskAtSend) qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, snapshot))
       taskSubmissionWait(qc, current !== ctx?.taskAtSend && current ? current : task)
       qc.setQueryData<QueuedMessage[]>(keys.taskQueue(destinationId), (list) => list?.map((m) => m.id === `tmp-${input.id}` && task.inputId ? { ...m, id: task.inputId } : m))
       // An owner close command was handled (closed or not) without enqueueing input: its stored copy replaces the pending one.

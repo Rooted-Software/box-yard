@@ -326,3 +326,18 @@ for (const kind of ["task", "subtask"] as const) it(`${kind}: an owner command's
   expect(lines().filter((m) => m.meta?.pending)).toEqual([])
   expect(qc.getQueryData<QueuedMessage[]>(keys.taskQueue(TASK))!.filter((m) => m.id.startsWith("tmp-"))).toEqual([])
 })
+
+it("task: an owner command's answer isn't cached on the task, so a later send with a lost response keeps its line", async () => {
+  mount("task")
+  await send(NO_MATCH)
+  await act(async () => posts[0]!.answer({ ...task(), ownerCommand: true }))
+  await flush()
+  expect(qc.getQueryData<Task[]>(keys.tasks)![0]).not.toHaveProperty("ownerCommand")
+  getMessages = () => new Promise(() => {})
+  await send("Follow this up")
+  // The queue confirmed storage, then the HTTP response was lost: the cached task stands in for it.
+  act(() => qc.setQueryData<QueuedMessage[]>(keys.taskQueue(TASK), (list) => [...(list ?? []), queueRow(1)]))
+  await act(async () => posts[1]!.answer({ error: "Response lost" }, 502))
+  await flush()
+  expect(lines().filter((m) => m.content === "Follow this up" && m.meta?.pending)).toHaveLength(1)
+})
