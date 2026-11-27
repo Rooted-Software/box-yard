@@ -1261,10 +1261,10 @@ export const refused = (err: unknown) => err instanceof ApiError && err.status >
 export function useSendTaskMessage(taskId: string, { quiet }: { quiet?: (err: Error) => boolean } = {}) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: async (input: { id?: string; content: string; attachments?: Attachment[]; taskId?: string }): Promise<Task & { inputId?: string }> => {
+    mutationFn: async (input: { id?: string; content: string; attachments?: Attachment[]; taskId?: string }): Promise<Task & { inputId?: string; ownerCommand?: boolean }> => {
       const destinationId = input.taskId ?? taskId
       try {
-        return await api<Task & { inputId?: string }>(`/api/tasks/${destinationId}/messages`, { body: { id: input.id, content: input.content, attachments: input.attachments?.map((a) => a.id) } })
+        return await api<Task & { inputId?: string; ownerCommand?: boolean }>(`/api/tasks/${destinationId}/messages`, { body: { id: input.id, content: input.content, attachments: input.attachments?.map((a) => a.id) } })
       } catch (err) {
         // The response can be lost after SSE already confirmed storage/delivery. Don't restore a duplicate draft.
         const confirmed = qc.getQueryData<TaskMessage[]>(keys.taskMessages(destinationId))?.some((m) => submissionId(m) === input.id && !m.meta?.pending)
@@ -1308,8 +1308,8 @@ export function useSendTaskMessage(taskId: string, { quiet }: { quiet?: (err: Er
       if (!staleAfterStop(task) && current === ctx?.taskAtSend) qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
       taskSubmissionWait(qc, current !== ctx?.taskAtSend && current ? current : task)
       qc.setQueryData<QueuedMessage[]>(keys.taskQueue(destinationId), (list) => list?.map((m) => m.id === `tmp-${input.id}` && task.inputId ? { ...m, id: task.inputId } : m))
-      // Owner close commands don't enqueue input.
-      if (task.status === "done" && !task.inputId) {
+      // An owner close command was handled (closed or not) without enqueueing input: its stored copy replaces the pending one.
+      if (task.ownerCommand) {
         qc.setQueryData<TaskMessage[]>(keys.taskMessages(destinationId), (list) => list?.filter((m) => m.id !== input.id || !m.meta?.pending))
         qc.setQueryData<QueuedMessage[]>(keys.taskQueue(destinationId), (list) => list?.filter((m) => m.id !== `tmp-${input.id}`))
       }

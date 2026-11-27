@@ -294,3 +294,35 @@ it("two failed idle sends leave no invented queued task state", async () => {
   expect(qc.getQueryData<QueuedMessage[]>(keys.taskQueue(TASK))).toEqual([])
   expect(qc.getQueryData<Task[]>(keys.tasks)![0]!.status).toBe("idle")
 })
+
+// An owner close command that resolves to nothing ("close stale issues …" → "No exact task match") is stored and
+// answered without queueing input: the owner's line shows once, whichever of SSE or HTTP arrives first.
+const NO_MATCH = "close stale issues or ones that are either not needed or already fixed"
+for (const kind of ["task", "subtask", "captain", "coordinator"] as const) for (const order of ["sse-first", "http-first"] as const) it(`${kind}: a close command that doesn't close shows the owner's message once (${order})`, async () => {
+  mount(kind)
+  await send(NO_MATCH)
+  const isTask = kind === "task" || kind === "subtask"
+  const meta = { ownerAction: "close_task", ...(isTask ? { clientMessageId: posts[0]!.body.id } : {}), ...(kind === "captain" ? { source: "cody" } : {}) }
+  const request = { ...stored(), ...(isTask ? { id: "tm_owner001", taskId: TASK } : {}), meta }
+  const reply = { id: isTask ? "tm_reply001" : "msg_reply001", ...(isTask ? { taskId: TASK } : {}), ...(kind === "captain" ? { projectId: PROJECT } : {}), role: isTask ? "event" : "assistant", content: "No exact task match.", createdAt: Date.now(), meta: { ownerAction: "close_task" } }
+  serverMessages = [request, reply]
+  const answer = async () => { await act(async () => posts[0]!.answer(isTask ? { ...task(), ownerCommand: true } : request, isTask ? 200 : 201)); await flush() }
+  if (order === "http-first") await answer()
+  await emit(messageEvent(request), messageEvent(reply))
+  if (order === "sse-first") await answer()
+  expect(lines().filter((m) => m.content === NO_MATCH)).toHaveLength(1)
+  expect(host.textContent?.split(NO_MATCH)).toHaveLength(2)
+  expect(qc.getQueryData<QueuedMessage[]>(keys.taskQueue(TASK))).toEqual([])
+  expect(queued()).toBeNull()
+})
+
+for (const kind of ["task", "subtask"] as const) it(`${kind}: an owner command's HTTP answer alone drops the pending line and its queue placeholder`, async () => {
+  mount(kind)
+  await send(NO_MATCH)
+  getMessages = () => new Promise(() => {}) // Neither SSE nor the refetch arrives.
+  expect(qc.getQueryData<QueuedMessage[]>(keys.taskQueue(TASK))).toHaveLength(1)
+  await act(async () => posts[0]!.answer({ ...task(), ownerCommand: true }))
+  await flush()
+  expect(lines().filter((m) => m.meta?.pending)).toEqual([])
+  expect(qc.getQueryData<QueuedMessage[]>(keys.taskQueue(TASK))!.filter((m) => m.id.startsWith("tmp-"))).toEqual([])
+})
