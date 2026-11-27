@@ -135,11 +135,14 @@ describe("Captain voice from the shared server stream", () => {
   })
 
   it("respects mute, quiet hours and background-only", async () => {
-    setVoiceSettings({ enabled: false })
+    // Switching voice on or off also saves it to the server. There's none here, so that save rejects; this test is
+    // about what this browser does with its switch, so handle the expected rejection instead of leaving it unhandled.
+    const save = (patch: Parameters<typeof setVoiceSettings>[0]) => void setVoiceSettings(patch)?.catch(() => {})
+    save({ enabled: false })
     await emit({ type: "captain.message", message: message() })
     const hour = new Date().getHours()
     const time = (value: number) => `${String(value % 24).padStart(2, "0")}:00`
-    setVoiceSettings({ enabled: true, quietHours: { enabled: true, start: time(hour), end: time(hour + 1) } })
+    save({ enabled: true, quietHours: { enabled: true, start: time(hour), end: time(hour + 1) } })
     await emit({ type: "captain.message", message: message() })
     setVoiceSettings({ quietHours: VOICE_DEFAULTS.quietHours, backgroundOnly: true })
     await emit({ type: "captain.message", message: message() })

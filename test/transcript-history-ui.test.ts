@@ -7,7 +7,8 @@ import { useTranscriptHistory } from "../web/src/lib/transcriptHistory"
 import { chatDays } from "../web/src/lib/chatDays"
 import { useTail } from "../web/src/lib/tail"
 import { api, ApiError } from "../web/src/lib/api"
-import type { StickyScrollHandle } from "../web/src/components/StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "../web/src/components/StickyScroll"
+import { toast } from "../web/src/lib/toast"
 import { ChatHistory, DayBoundary } from "../web/src/components/ChatHistory"
 
 vi.mock("../web/src/lib/api", async (original) => ({ ...await original<typeof import("../web/src/lib/api")>(), api: vi.fn() }))
@@ -202,9 +203,9 @@ describe("bounded retained history", () => {
   })
 
   it("keeps a new conversation live after its first message has nothing before it", async () => {
-    // A brand-new task: its dates were read before its first message, and the short thread asks for earlier rows.
+    // A brand-new task whose dates haven't loaded yet: the short thread asks for earlier rows.
     vi.mocked(api).mockImplementation(async (path) => {
-      if (String(path).includes("days=1")) return { days: [], oldestId: null } as never
+      if (String(path).includes("days=1")) return new Promise(() => {}) as never
       return { messages: [], before: null, after: null } as never
     })
     render(undefined, [item(0)]); await settle()
@@ -248,4 +249,78 @@ describe("bounded retained history", () => {
     render(undefined, [...live, { ...item(1601), meta: { queued: true } }, { ...item(1602), meta: { cancelled: true } }])
     expect(state.days?.at(-1)?.messageId).toBe("m-1499")
   })
+
+  it("doesn't ask for anything before an optimistic first message in an empty chat", async () => {
+    // A new Captain chat: the dates were read while it was empty, then the first send shows under a client id.
+    let oldestId: string | null = null
+    vi.mocked(api).mockImplementation(async (path) => {
+      if (String(path).includes("days=1")) return { days: [], oldestId } as never
+      if (String(path).includes("before=m-0")) return { messages: [], before: null, after: null } as never
+      // The server only knows saved rows: any other anchor is a 400, as in server/transcriptHistory.ts.
+      throw new ApiError("History message not found in this conversation", 400)
+    })
+    const error = vi.spyOn(toast, "error")
+    // Like the browser, the "Show earlier messages" row loads as soon as it shows.
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(private fn: IntersectionObserverCallback) {}
+      observe(el: Element) { this.fn([{ isIntersecting: true, target: el } as IntersectionObserverEntry], this as never) }
+      disconnect() {}
+    })
+    const indexReads = () => vi.mocked(api).mock.calls.filter(([path]) => String(path).includes("days=1")).length
+    // Wired as ChatPanel, CaptainTab and TaskView wire it.
+    function Chat({ list }: { list: (typeof live)[number][] }) {
+      state = useTranscriptHistory("/api/projects/p-1/captain/history", list)
+      return h(StickyScroll, { count: list.length, hidden: state.moreBefore ? 1 : 0, earlierLabel: "Show earlier messages", onLoadEarlier: state.earlier,
+        children: state.items.map((m) => h("div", { key: m.id }, m.content)) })
+    }
+    const show = (list: (typeof live)[number][]) => act(() => root.render(h(QueryClientProvider, { client: qc }, h(Chat, { list }))))
+    show([]); await settle()
+    expect(indexReads()).toBe(1)
+    const sent = { ...item(0), id: "chat-client-1", role: "user", content: "Why is the same message showing up twice?", meta: { pending: true, clientMessageId: "chat-client-1" } }
+    show([sent]); await settle()
+    expect(state.moreBefore).toBe(false)
+    act(() => state.earlier()); await settle()
+    expect(host.textContent).not.toContain("Show earlier messages")
+    expect(vi.mocked(api).mock.calls.some(([path]) => String(path).includes("before="))).toBe(false)
+    expect(error).not.toHaveBeenCalled()
+    // It lands under its server id: the empty index is read again once, and still nothing comes before it.
+    oldestId = "m-0"
+    show([{ ...sent, id: "m-0", meta: null }]); await settle()
+    expect(indexReads()).toBe(2)
+    expect(state.moreBefore).toBe(false)
+    show([{ ...sent, id: "m-0", meta: null }, item(1), { ...item(2), id: "chat-client-2", meta: { pending: true } }]); await settle()
+    expect(indexReads()).toBe(2)
+    expect(host.textContent).not.toContain("Show earlier messages")
+    expect(vi.mocked(api).mock.calls.some(([path]) => String(path).includes("before="))).toBe(false)
+    expect(error).not.toHaveBeenCalled()
+  })
+
+  it("anchors earlier history on the first saved message, not an optimistic one", async () => {
+    vi.mocked(api).mockImplementation(async (path) => {
+      if (String(path).includes("days=1")) return new Promise(() => {}) as never
+      return { messages: [], before: null, after: null } as never
+    })
+    const pending = { ...item(0), id: "chat-client-1", meta: { pending: true } }
+    render(undefined, [pending]); await settle()
+    expect(state.moreBefore).toBe(false)
+    act(() => state.earlier()); await settle()
+    expect(vi.mocked(api).mock.calls.some(([path]) => String(path).includes("before="))).toBe(false)
+    render(undefined, [pending, item(1)]); await settle()
+    expect(state.moreBefore).toBe(true)
+    act(() => state.earlier()); await settle()
+    expect(api).toHaveBeenLastCalledWith("/api/chat/history?before=m-1")
+    expect(state.moreBefore).toBe(false)
+  })
+
+  it("anchors newer history on the last saved message, not an optimistic one", async () => {
+    const pending = { ...item(2), id: "chat-client-1", meta: { pending: true } }
+    render(undefined, [pending]); await settle()
+    act(() => state.later()); await settle()
+    expect(vi.mocked(api).mock.calls.some(([path]) => String(path).includes("after="))).toBe(false)
+    vi.mocked(api).mockResolvedValueOnce({ messages: [], before: null, after: null } as never)
+    render(undefined, [item(1), pending]); await settle()
+    act(() => state.later()); await settle()
+    expect(api).toHaveBeenLastCalledWith("/api/chat/history?after=m-1")
+  })
 })
+
