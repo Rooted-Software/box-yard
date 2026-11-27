@@ -8,6 +8,10 @@ import { toast } from "./toast"
 
 type Message = { id: string; createdAt: number; role?: string; meta?: Record<string, unknown> | null }
 
+/** The first message the server has: an optimistic send (`meta.pending`) has only a client id until it lands, so
+ * "before" it means nothing to the server, which answers 400. Anchor earlier-history requests on this instead. */
+const firstSaved = <M extends Message>(list: M[]) => list.find((m) => !m.meta?.pending)
+
 export type HistoryIndexState = { status: "loading" | "ready" | "error" | "unsupported"; retry: () => void }
 class HistoryUnavailable extends Error {}
 
@@ -97,7 +101,8 @@ export function useTranscriptHistory<M extends Message>(path: string, live: M[])
       // Nothing before the live list's first message: the whole conversation is live. Stay on it rather than open a
       // reading window over a copy of it, which would stop showing what streams in (a new task's reply).
       if (!page && query.before && !messages.length) {
-        if (previous[0]) setStart({ path, id: previous[0].id })
+        const first = firstSaved(previous)
+        if (first) setStart({ path, id: first.id })
         return true
       }
       const fresh = new Set(messages.map((m) => m.id))
@@ -127,7 +132,7 @@ export function useTranscriptHistory<M extends Message>(path: string, live: M[])
   }, [request])
   const earlier = useCallback(() => {
     const { page, items } = latest.current
-    const id = (page?.messages ?? items)[0]?.id
+    const id = firstSaved(page?.messages ?? items)?.id
     if (id) void request({ before: page?.positions?.[id] ?? id })
   }, [request])
   const later = useCallback(() => {
@@ -141,9 +146,16 @@ export function useTranscriptHistory<M extends Message>(path: string, live: M[])
     setLoading(false)
     setWindow(null)
   }, [])
-  const first = items[0]?.id
+  const first = useMemo(() => firstSaved(items)?.id, [items])
+  // An index read while the conversation was empty (oldestId null) predates every message in the live list, so
+  // nothing comes before them. Read it again once the first message lands, so the dates and oldest id catch up.
+  const emptyIndex = metadata.data?.oldestId === null
+  const refetchDates = metadata.refetch
+  useEffect(() => {
+    if (emptyIndex && first) void refetchDates()
+  }, [emptyIndex, first, path, refetchDates])
   const moreBefore = page ? !!page.before
-    : !!first && !(start?.path === path && start.id === first) && (!metadata.data || metadata.data.oldestId !== first)
+    : !!first && !emptyIndex && !(start?.path === path && start.id === first) && (!metadata.data || metadata.data.oldestId !== first)
   const days = useMemo<ChatDay[] | undefined>(() => {
     if (!metadata.data?.days) return undefined
     const byDay = new Map<string, ChatDay>()
