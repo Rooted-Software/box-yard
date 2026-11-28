@@ -87,7 +87,7 @@ function defaultCursorBin(): string {
   return !onPath && fs.existsSync(installed) ? installed : "cursor-agent"
 }
 
-export type ProviderName = "upstash" | "local"
+export type ProviderName = "upstash" | "local" | "agent37"
 
 export const config = {
   port: int("PORT", 3000),
@@ -199,6 +199,12 @@ export const config = {
   vastApiKey: env.VAST_API_KEY ?? "",
   /** Daytona sandboxes (Settings › Daytona, docs/daytona.md). Optional. */
   daytonaApiKey: env.DAYTONA_API_KEY ?? "",
+  /** Agent37 instances as pool boxes (Settings › Box providers › Agent37 boxes, docs/agent37.md). Optional. */
+  agent37ApiKey: env.AGENT37_API_KEY ?? "",
+  /** The Agent37 template new boxes start from; empty: agent37-base. A workspace template of your own works too. */
+  agent37Template: env.AGENT37_TEMPLATE?.trim() ?? "",
+  /** Seconds an idle Agent37 box waits before it sleeps (300 to 86400). */
+  agent37IdleSleepSeconds: int("AGENT37_IDLE_SLEEP_SECONDS", 900),
   /** The docker CLI for Docker projects (docs/docker.md); empty: found on PATH or where Docker Desktop puts it. */
   dockerBin: env.DOCKER_BIN?.trim() ?? "",
   /**

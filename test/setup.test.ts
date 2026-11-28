@@ -425,7 +425,7 @@ describe("box provider", () => {
     const local = new LocalProvider(dir("boxes-"), FAKE_CLAUDE)
     const upstash = { name: "upstash", nodeBin: "node", claudeBin: "claude", root: () => "/workspace/home" } as unknown as BoxProvider
     let on = false
-    const auto = new AutoProvider(local, upstash, () => on)
+    const auto = new AutoProvider(local, upstash, () => (on ? "upstash" : "local"))
     expect(auto.name).toBe("local")
     on = true
     expect(auto.name).toBe("upstash")

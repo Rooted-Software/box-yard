@@ -9,6 +9,7 @@ import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { GpuPick, GpuProvider } from "./gpu.js"
+import type { BoxPool } from "./agent37.js"
 import type { AgentCli, ManagerCli } from "./agentCli.js"
 import type { CaptainIconId } from "./captainIcons.js"
 import type { Connector } from "./connectors.js"
@@ -967,6 +968,11 @@ export interface Settings {
   agentAutoCompact: AutoCompact
   /** Upstash Box size used for new worker boxes (a project's preferred size wins). */
   workerSize: WorkerSize
+  /**
+   * Where new pool boxes come from: Upstash Box, or Agent37 instances (docs/agent37.md). Existing boxes stay where they
+   * are. BOX_PROVIDER in the env wins.
+   */
+  boxPool: BoxPool
   /**
    * Default GPU cloud: where GPU projects without a cloud of their own, and tasks picked with "@gpu", get their pods
    * (Settings › Box providers). A project's own cloud, or a task's "@gpu:<cloud>", wins.

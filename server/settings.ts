@@ -1,3 +1,4 @@
+import { BOX_POOLS } from "../shared/agent37.js"
 import { z } from "zod"
 import type { Config } from "./config.js"
 import { BadRequestError, type Store } from "./store.js"
@@ -123,6 +124,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Off means the CLI's own default (compact near the model's window) applies.
   agentAutoCompact: { enabled: false, unit: "percent", value: 80 },
   workerSize: "small",
+  boxPool: "upstash",
   gpuProvider: DEFAULT_GPU_PROVIDER,
   autoResizeEnabled: true,
   autoResizeMaxSize: "large",
@@ -304,6 +306,9 @@ export const settingsPatch = z
     agentRoutingConfig: z.string().max(50_000),
     agentAutoCompact: autoCompact,
     workerSize: z.enum(WORKER_SIZES),
+    boxPool: z
+      .enum(BOX_POOLS)
+      .describe('Where new pool boxes come from: "upstash" (Upstash Box) or "agent37" (Agent37 instances, needs an Agent37 API key). Existing boxes stay where they are; BOX_PROVIDER in the env wins'),
     gpuProvider: z
       .enum(GPU_PROVIDERS)
       .describe('Default GPU cloud: where GPU projects without a cloud of their own, and tasks picked with "@gpu", run. A project\'s own cloud or a task\'s "@gpu:<cloud>" wins'),
