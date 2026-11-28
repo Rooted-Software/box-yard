@@ -63,6 +63,7 @@ This isn't supported yet. The pool's cloud is one choice for the whole yard, bec
   - deleting the snapshot deletes the fork, and Box Yard refuses to delete any instance that isn't one of its snapshots.
 - **Resize.** The provider can resize an instance in place (cpu and memory either way, disk only up), but the yard resizes by migration, as on Upstash. That's because one yard can hold boxes on both clouds.
 - **Leftovers and reconcile.** The orphan sweep looks for this install's label on every cloud with a key, so a switch leaves nothing behind. Snapshot forks are never swept. Reconcile lists the workspace's instances to notice a box deleted in Agent37's dashboard.
+- **Auto-sizing** doesn't measure Agent37 boxes yet. It reads a box's own cgroup counters, and Box Yard hasn't checked that a gVisor instance exposes them, so the provider doesn't claim its own cgroup. A project's own Box size, or Settings' size, applies instead.
 - **Cost.** Agent37 bills a running instance by the minute, whatever its CPU does. Box Yard's compute figure for a box is Agent37's own charge from `GET /v1/usage`, per instance. Agent37 settles that hourly, so it can be up to an hour behind. Box Yard doesn't price Agent37 boxes by CPU time at Upstash's rates. Disk is still metered at Settings › Usage's storage rate on top, which counts disk Agent37 already bills; that's cents a month per box.
 
 ## Safety
@@ -83,6 +84,7 @@ The tests use a fake Agent37 (`test/agent37.test.ts`). These things come from Ag
 - that `GET /v1/usage` lists instances by the bare id with `compute_micros`;
 - that a 30-second exec poll counts as activity, so a box doesn't sleep under a running turn;
 - that a signed preview URL opens a dev server's page and its WebSocket in a browser tab;
+- whether `/sys/fs/cgroup` in an instance is the instance's own, so auto-sizing could measure Agent37 boxes too;
 - how long a create takes, and what Box Yard's create timeout should be.
 
 ## Files
