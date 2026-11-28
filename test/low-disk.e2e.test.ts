@@ -39,6 +39,8 @@ class DiskBoxes extends LocalProvider {
   failSetups = 0
   /** A failed setup also leaves its box this full. */
   fullOnFail = 0
+  /** Fail this many writes of a task's task.json the way Upstash's file API does on a full disk. */
+  failWrites = 0
   /** Holds the runner's clean mode until released, to watch a task wait for cleanup. */
   gate: Promise<void> | null = null
 
@@ -57,6 +59,14 @@ class DiskBoxes extends LocalProvider {
 
   stageDir(boxId: string) {
     return path.join(this.root(boxId), ".boxyard", "tmp")
+  }
+
+  override async writeFile(boxId: string, filePath: string, content: string | Buffer) {
+    if (this.failWrites > 0 && filePath.endsWith("/task.json")) {
+      this.failWrites--
+      throw new Error("Failed to write file")
+    }
+    return super.writeFile(boxId, filePath, content)
   }
 
   override async exec(boxId: string, command: string): Promise<ExecResult> {
@@ -247,6 +257,148 @@ describe("low-disk placement", () => {
   })
 })
 
+describe("workspace footprint", () => {
+  it("measures each task folder after its turn, and reserves the project's footprint for a new workspace", async () => {
+    const r = await start({ maxBoxes: 2, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    const measured = await waitFor(() => r.yard.store.workspaceSizes(p.id).find((s) => s.taskId === first.id), "the folder's size after the turn")
+    expect(measured.boxId).toBe(box)
+    expect(measured.bytes).toBeGreaterThan(0)
+
+    // Its folders grow to 3 GB in a turn (dependencies, LFS, builds): 2 GB free is far over the 500 MB floor, but
+    // not room for another.
+    r.yard.tasks.noteWorkspaceSize(first.id, box, 3 * GB)
+    expect(r.yard.tasks.workspaceFootprint(p.id)).toEqual({ peakBytes: 3 * GB, tasks: 1 })
+    // A 20 GB disk (so Task folders kept per box still fits a few) with 2 GB free.
+    ballast(path.join(r.provider.root(box), "other"), 18 * GB)
+    r.provider.fill(box, 2 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    const second = await until(r, (await task(r, p.id, "second")).id, "idle")
+    expect(second.boxId).not.toBe(box)
+    expect(events(r, second.id)).toContain(`Waiting for a new box: ${box} is low on disk.`)
+    const cleanup = await cleanupDone(r, box)
+    // What it aimed for: the footprint with 25% headroom.
+    expect(cleanup.targetFreeBytes).toBe(3.75 * GB)
+  })
+
+  it("counts what running neighbours' folders have yet to grow by", async () => {
+    const r = await start({ maxBoxes: 2, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    // 1 GB folders (1.25 GB expected), 2 GB free: room for one more, unless a turn running there still grows.
+    r.yard.tasks.noteWorkspaceSize(first.id, box, 1 * GB)
+    ballast(path.join(r.provider.root(box), "other"), 18 * GB)
+    r.provider.fill(box, 2 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    const hanging = await task(r, p.id, "hangs", "write a haiku [hang]")
+    await waitFor(async () => (await getTask(r, hanging.id)).status === "working", "the hanging turn")
+    expect((await getTask(r, hanging.id)).boxId).toBe(box)
+    r.provider.fill(box, 2 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    // The hanging task's folder is barely cloned: it may grow by most of 1.25 GB, so 2 GB doesn't fit another.
+    const third = await until(r, (await task(r, p.id, "third")).id, "idle")
+    expect(third.boxId).not.toBe(box)
+    expect(events(r, third.id)).toContain(`Waiting for a new box: ${box} is low on disk.`)
+    await call(r, "POST", `/api/tasks/${hanging.id}/stop`)
+  })
+
+  it("fits Task folders kept per box to the project's footprint", async () => {
+    const r = await start({ maxBoxes: 1, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    await r.yard.tasks.probeDisk(box, 0)
+    const total = (await boxes(r)).find((b) => b.id === box)!.diskTotalBytes!
+    // Folders that take 45% of the disk: one fits a box of this size, though it has room to spare right now.
+    r.yard.tasks.noteWorkspaceSize(first.id, box, Math.floor((total * 0.45) / 1.25) * 1.25)
+    const line = r.yard.tasks.projectBoxSettings({ ...(r.yard.store.getProject(p.id) as Project) }).tasksPerBox
+    expect(line).toMatch(/^auto: small \d+, medium \d+, large \d+ by disk \(.+ per workspace \(peak of 1 task in 14 days\); each box keeps the free-space floor\)$/)
+    const second = await task(r, p.id, "second")
+    const waiting = await waitFor(async () => {
+      const t = await getTask(r, second.id)
+      return t.status === "queued" && t.waitReason ? t : null
+    }, "the second task to wait")
+    expect(waiting.boxId).toBeNull()
+    expect(r.yard.store.listTaskRows({ boxId: box }).map((t) => t.id)).toEqual([first.id])
+  })
+})
+
+describe("out of disk on the box a workspace is on", () => {
+  it("names the full box when a start fails with Failed to write file, and moves the task when its archive holds the workspace", async () => {
+    const r = await start({ maxBoxes: 2 })
+    const p = await project(r, "alpha")
+    const first = await settled(r, (await task(r, p.id, "first")).id)
+    const box = first.boxId!
+    r.provider.fill(box, 50 * MB)
+    r.provider.failWrites = 1
+    await call(r, "POST", `/api/tasks/${first.id}/messages`, { content: "one more haiku" })
+    const moved = await waitFor(async () => {
+      const t = await getTask(r, first.id)
+      return t.status === "idle" && t.boxId && t.boxId !== box && t.pendingCount === 0 ? t : null
+    }, "the task to carry on on another box")
+    expect(moved.error).toBeNull()
+    const ev = events(r, first.id)
+    expect(ev.some((e) => e.startsWith(`Box ${box} ran out of disk space while starting the turn (`) && e.includes("free of"))).toBe(true)
+    expect(ev.some((e) => e.startsWith(`Moved from ${box} to ${moved.boxId}: box ${box} is out of disk (`))).toBe(true)
+    expect(ev.some((e) => e.startsWith("Couldn't start the agent"))).toBe(false)
+    expect(fs.existsSync(r.yard.tasks.taskDir(box, first.id))).toBe(false)
+  })
+
+  it("waits with the reason when its work can't move, takes queued messages without failing, and starts once there's room", async () => {
+    const r = await start({ maxBoxes: 2, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    r.provider.fill(box, 50 * MB)
+    r.provider.failWrites = 1
+    await call(r, "POST", `/api/tasks/${first.id}/messages`, { content: "one more haiku" })
+    const waiting = await waitFor(async () => {
+      const t = await getTask(r, first.id)
+      return t.status === "queued" && t.waitReason?.startsWith("Waiting for disk space") ? t : null
+    }, "the task to wait for disk")
+    expect(waiting.waitReason).toMatch(new RegExp(`^Waiting for disk space on ${box}: box ${box} is out of disk \\(.+ free of .+\\), cleanup couldn't free the .+ this task's turn needs, and its workspace can't move: its workspace has no archive from after its last turn$`))
+    expect(waiting.boxId).toBe(box)
+    expect(waiting.error).toBeNull()
+    const notice = await waitFor(() => r.yard.store.listChat().find((m) => m.role === "notice" && m.content.includes("is waiting for disk")), "the notice")
+    expect(notice.content).toMatch(new RegExp(`^⚠️ \\*\\*first\\*\\* is waiting for disk: box ${box} is out of disk \\(`))
+    // Another message joins the queue: no start is tried on the full box meanwhile.
+    await call(r, "POST", `/api/tasks/${first.id}/messages`, { content: "and another" })
+    await new Promise((res) => setTimeout(res, 1000))
+    expect((await getTask(r, first.id)).status).toBe("queued")
+    expect(events(r, first.id).some((e) => e.startsWith("Couldn't start the agent"))).toBe(false)
+
+    r.provider.fill(box, 5 * GB)
+    const ran = await until(r, first.id, "idle")
+    expect(ran.boxId).toBe(box)
+    expect(ran.waitReason).toBeNull()
+  })
+
+  it("carries on once after a turn runs out of disk, and the retry is told why", async () => {
+    const r = await start({ maxBoxes: 1 })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    await call(r, "POST", `/api/tasks/${first.id}/messages`, { content: "write it out [enospc]" })
+    const done = await waitFor(async () => {
+      const t = await getTask(r, first.id)
+      return t.status === "idle" && t.turnCount >= 3 && t.pendingCount === 0 ? t : null
+    }, "the turn to carry on")
+    expect(done.error).toBeNull()
+    const ev = events(r, first.id)
+    expect(ev.some((e) => e.startsWith(`Turn 2 stopped: box ${first.boxId} is out of disk (`) && e.includes("the task carries on once there's room"))).toBe(true)
+    // The agent's next prompt says what happened.
+    const demo = fs.readFileSync(path.join(r.yard.tasks.taskDir(done.boxId!, first.id), "work", "box-yard-demo.md"), "utf8")
+    expect(demo).toContain(`Your previous turn stopped because box ${first.boxId} is out of disk (`)
+    expect(demo).toContain("ENOSPC: no space left on device")
+    const notice = r.yard.store.listChat().find((m) => m.role === "notice" && m.content.includes("ran out of disk"))
+    expect(notice?.content).toMatch(/^⚠️ \*\*first\*\* ran out of disk: box /)
+    const cleanup = await cleanupDone(r, first.boxId!)
+    expect(cleanup.reason).toBe("out-of-space")
+  })
+})
+
 describe("out of space during setup", () => {
   it("cleans up and retries once, then the task runs", async () => {
     const r = await start({ maxBoxes: 1, archiveWorkspaces: false })
@@ -255,7 +407,7 @@ describe("out of space during setup", () => {
     const t = await until(r, (await task(r, p.id, "retry me")).id, "idle")
     expect(t.error).toBeNull()
     const ev = events(r, t.id)
-    expect(ev.some((e) => e.startsWith(`Box ${t.boxId} ran out of disk space while setting up the workspace. Cleaning it up and retrying once`))).toBe(true)
+    expect(ev.some((e) => new RegExp(`^Box ${t.boxId} ran out of disk space while setting up the workspace \\(.+ free of .+\\)\\. Cleaning it up and retrying once`).test(e))).toBe(true)
     expect(ev.some((e) => e.startsWith("Couldn't start the agent"))).toBe(false)
     const cleanup = await cleanupDone(r, t.boxId!)
     expect(cleanup.reason).toBe("out-of-space")
@@ -278,7 +430,7 @@ describe("out of space during setup", () => {
     r.provider.failSetups = 2
     const p = await project(r, "alpha")
     const t = await until(r, (await task(r, p.id, "still full")).id, "failed")
-    expect(t.error).toMatch(/^Couldn't start the agent: box \S+ is out of disk space \(.+ free of .+\), even after cleaning it up and retrying\./)
+    expect(t.error).toMatch(/^Couldn't start the agent: box \S+ is out of disk \(.+ free of .+\), even after cleaning it up and retrying\./)
     expect(t.error).toContain("Out of diskspace")
   })
 })
@@ -320,7 +472,7 @@ describe("box cleanup", () => {
     r.provider.fill(box, free)
     // Enough once the leftover folder and the done task's dependencies are gone.
     const first = await r.yard.tasks.janitor.run(box, { reason: "low-disk", target: free + 250 * MB, parkBelow: free + 250 * MB })
-    expect(first.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
+    expect(first.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive", "pushed"])
     const step = (c: BoxCleanup, key: string) => c.steps.find((s) => s.key === key)!
     expect(step(first, "tmp").skipped).toBe("no stale temp folders (a local box's /tmp is this machine's, so it's left alone)")
     expect(step(first, "partials").removed).toContain("task_gone (unknown task)")

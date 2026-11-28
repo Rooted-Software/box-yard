@@ -1341,6 +1341,21 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN parked_at INTEGER;
   ALTER TABLE tasks ADD COLUMN park_resume INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+  -- Workspace footprints (shared/workspaceDisk.ts): how much disk a task's folder took on its box, measured with du
+  -- at the end of each turn. bytes is the last reading, peak_bytes the most it took, both while on box_id (a move to
+  -- another box starts over). A project's 14-day peak sizes what placement reserves for a new workspace and how many
+  -- task folders fit a box. A deleted task's rows still count for its project.
+  CREATE TABLE workspace_sizes (
+    task_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    box_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    bytes INTEGER NOT NULL,
+    peak_bytes INTEGER NOT NULL
+  );
+  CREATE INDEX workspace_sizes_project ON workspace_sizes(project_id, at);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

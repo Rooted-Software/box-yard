@@ -64,7 +64,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { memoryPressure, type BoxMemory, type MemoryPolicy } from "../shared/memory.js"
 import { DEFAULT_AGENT_BYTES } from "./machineStats.js"
-import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
+import { cleanupSummary, dfCommand, diskFailure, diskLine, formatBytes, isOutOfSpace, outOfDiskText, parseDf, requiredFreeBytes, rootLow, TURN_MIN_FREE_BYTES, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor, DEPS_DIR, cleanOutput, pushedCheck, pushedVerdict } from "./janitor.js"
 import { branchEvidenceScript, branchName, mergedHeadsScript, parseBranchEvidence, parseMergedHeads } from "./branchNames.js"
 import { OWN_UPKEEP_MS, OwnCleanup } from "./ownCleanup.js"
@@ -105,6 +105,7 @@ import { turnTiming } from "./turnTimings.js"
 import { perfMark, perfSpan } from "./perfTrace.js"
 import type { TurnClockReading } from "../shared/turnTimings.js"
 import { pickAutoSize, type ProjectAutoSize, type TurnPeak } from "../shared/autoSize.js"
+import { expectedWorkspaceBytes, footprintLabel, parseWorkspaceDu, workspaceDuCommand, workspaceFootprint, workspaceGrowth, workspacesThatFit, type WorkspaceFootprint } from "../shared/workspaceDisk.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import type { BoxPick } from "../shared/placement.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
@@ -118,6 +119,7 @@ import {
   BOX_SIZE_SPECS,
   scaleDownFit as scaleDownFitCheck,
   sizeSpecLine,
+  workDiskBytes,
   type BoxResize,
   type DiskFit,
   type ResizeInitiator,
@@ -171,6 +173,13 @@ const REOPENED_AS: Partial<Record<TaskStatus, string>> = {
 
 const queueEntry = (r: TaskRow): QueueEntry => ({ priority: parsePriority(r.priority), queuedAt: r.last_active_at })
 
+/** "Box b1 is out of disk" from "box b1 is out of disk". */
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+/** A box's last df reading, or null before one. */
+const diskOf = (b: Pick<BoxRow, "disk_free_bytes" | "disk_total_bytes" | "root_free_bytes" | "root_total_bytes">) =>
+  b.disk_free_bytes != null && b.disk_total_bytes != null
+    ? { freeBytes: b.disk_free_bytes, totalBytes: b.disk_total_bytes, root: b.root_free_bytes != null && b.root_total_bytes != null ? { freeBytes: b.root_free_bytes, totalBytes: b.root_total_bytes } : null }
+    : null
 const holdsSlot = (r: TaskRow) => Boolean(r.current_turn_id) || r.status === "starting" || r.status === "working"
 /** "1 box", "3 boxes". */
 const boxCount = (n: number) => `${n} ${n === 1 ? "box" : "boxes"}`
@@ -753,6 +762,8 @@ export class TaskManager {
   private meter = new TurnMeter()
   /** Auto-sizing: each project's measured turns (table turn_peaks), read once and dropped when another lands. */
   private turnPeakCache = new Map<string, TurnPeak[]>()
+  /** Workspace footprints: each project's measured task folders (table workspace_sizes), dropped when another lands. */
+  private footprintCache = new Map<string, WorkspaceFootprint | null>()
   /** Running turns' server side, for their timings (turn_timings): when they were asked for and launched, by turn id. */
   private turnLaunches = new Map<string, { requestedAt: number | null; launchedAt: number; trigger: string | null; model: string | null; effort: string | null; resumed: boolean }>()
   /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
@@ -789,6 +800,15 @@ export class TaskManager {
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
   private diskHold = new Map<string, string>()
+  /**
+   * Tasks whose last start or turn ran out of disk on the box their workspace is on: their next turn there needs the
+   * full free-space floor, else they move (when their work can) or wait with the reason (`residentDisk`).
+   */
+  private diskFull = new Map<string, string>()
+  /** Tasks whose wait for disk on a box was already told to the Captain, and that box; forgotten once a turn starts. */
+  private diskWaitNoted = new Map<string, string>()
+  /** The last pushedCheck of a task waiting on a full box (`pushedVerdictOf`). */
+  private pushedSeen = new Map<string, { boxId: string; activeAt: number; at: number; verdict: string }>()
   private lowDiskNoticeAt = new Map<string, number>()
   /** Called after every notice; return true when another owner handled delivery. */
   onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
@@ -946,7 +966,7 @@ export class TaskManager {
       archive: (taskId) => this.archiveFresh(taskId),
       archiveProblem: (taskId) => this.archiveProblem(taskId),
       park: (taskId, boxId, note) => this.park(taskId, boxId, note),
-      dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
+      dropPushed: (taskId, boxId, why) => this.dropPushed(taskId, boxId, why),
       pushedOnGitHub: (taskId, boxId) => this.pushedOnGitHub(taskId, boxId),
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
@@ -2431,10 +2451,22 @@ export class TaskManager {
     return {
       boxSize: p.boxSize ? own(p.boxSize) : this.autoSizeLine(p.id),
       agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its tasks at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Tasks running at once per box"),
-      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Task folders kept per box"),
+      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : (this.autoTasksPerBoxLine(p.id) ?? global("maxResidentPerBox", "Task folders kept per box")),
       maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
       ...(p.wholeMachine ? { wholeMachine: "yes: no other project's task starts on a box or this computer while one of its tasks runs there" } : {}),
     }
+  }
+
+  /**
+   * "auto: small 1, medium 2, large 3 by disk (7.1 GB per workspace …)": Task folders per box from the project's
+   * measured workspaces (`foldersThatFit`), each held to the box's own limit. Null while unmeasured. Agents on a box
+   * never outnumber its task folders, so this bounds how many of its tasks run on one box too.
+   */
+  private autoTasksPerBoxLine(projectId: string): string | null {
+    const f = this.workspaceFootprint(projectId)
+    if (!f) return null
+    const per = BOX_SIZES.map((z) => `${z} ${Math.min(this.sizeLimits(z).maxResidentPerBox, this.foldersThatFit(projectId, z) ?? Infinity)}`)
+    return `auto: ${per.join(", ")} by disk (${footprintLabel(f)}; each box keeps the free-space floor)`
   }
 
   /** A project's box size when it has none of its own: what auto-sizing picked, else Settings › Worker size. */
@@ -3831,7 +3863,7 @@ export class TaskManager {
       if (!shared) this.claimedSlots.set(turnId, slots)
       if (isLocalRunnerBox(boxId)) this.localStarts.push(Date.now())
       // A workspace about to be made here takes disk the next placement mustn't count on.
-      if (row.box_id !== boxId) this.reserve(boxId, row.id, this.cloneBytes(row) ?? 0)
+      if (row.box_id !== boxId) this.reserve(boxId, row.id, Math.max(this.cloneBytes(row) ?? 0, this.expectedWorkspace(row.project_id) ?? 0))
       this.store.touchBox(boxId)
       this.emitTask(row.id)
       void this.launch(row.id, boxId, turnId)
@@ -4112,6 +4144,11 @@ export class TaskManager {
           const moved = await this.leaveOtherCredsBox(row, box.id)
           if (moved !== "stay") return moved
         }
+        // Its box has no disk for the turn: it waits for the cleanup there, moves when its work is safe elsewhere,
+        // or waits with the reason, rather than start (and fail) on a full disk again.
+        const disk = await this.residentDisk(row, box.id)
+        if (this.stopped) return null
+        if (disk !== "ok") return disk
         // Busy: no free slot, or a free one that a project's Agents per box or the box's memory rules out.
         const full = this.runningOn(box.id) >= this.slotsFor(box.id)
         const busy = full ? null : (this.limitBlock(row, box.id) ?? asWait(await this.memoryBlock(box.id, row.id)))
@@ -4139,6 +4176,101 @@ export class TaskManager {
     }
     const boxId = await this.pickBox(row.id)
     return boxId ? this.assign(row.id, boxId) : null
+  }
+
+  /**
+   * Whether the box a task's workspace is on has disk for its next turn: "ok", or where it goes instead (another box's
+   * id, or null to wait, with the wait reason set). The turn needs free room for what its folder may still grow by
+   * (`workspaceGrowth`) and for what its running neighbours' may (`pendingDisk`), on top of TURN_MIN_FREE_BYTES (or
+   * Settings' free-space floor, when that's lower); after
+   * a start or turn ran out of disk there (`diskFull`), on top of the full free-space floor. Short of that the box is
+   * cleaned up; once the cleanup did all it could, the task moves when its work is safe (`leaveFullBox`), else waits.
+   */
+  private async residentDisk(row: TaskRow, boxId: string): Promise<"ok" | string | null> {
+    // Upstash and other cloud boxes: a folder on this computer or an SSH machine is the owner's to free.
+    if (!this.store.getBox(boxId)) return "ok"
+    const ranOut = this.diskFull.get(row.id) === boxId
+    const space = await this.probeDisk(boxId, ranOut ? 0 : DISK_CACHE_MS)
+    // df failing shouldn't stop work.
+    if (this.stopped || !space) return "ok"
+    // Settings' free-space floor caps the little a turn needs, so a floor of 0 (a dev machine's own disk) holds nothing back.
+    const floor = this.diskNeed(null)
+    const need = this.workspaceGrowth(row, boxId) + this.pendingDisk(boxId, row.id) + (ranOut ? floor : Math.min(TURN_MIN_FREE_BYTES, floor))
+    if (space.freeBytes >= need) return "ok"
+    if (!this.lowBoxes.has(boxId)) {
+      this.lowBoxes.add(boxId)
+      this.emitBoxes()
+    }
+    const full = outOfDiskText(boxId, space)
+    const state = this.janitor.ensure(boxId, need, ranOut ? "out-of-space" : "low-disk")
+    const needs = `${formatBytes(need)} free${this.pendingDisk(boxId, row.id) > 0 ? " (with room for what the turns running there may still grow by)" : ""}`
+    if (state === "running") {
+      this.setWaitReason(row.id, `Waiting for disk cleanup on ${boxId}: ${full}, and this task's turn needs ${needs}`)
+      return null
+    }
+    return this.leaveFullBox(row, boxId, full, needs)
+  }
+
+  /**
+   * A task whose box is out of disk after a cleanup that did all it could: it moves to another box when nothing would
+   * be lost. Its archive may carry it (`stayReason`), or GitHub may: a folder with nothing uncommitted, stashed or
+   * unpushed (pushedCheck) leaves without an archive and starts on the other box from a recap. Else it waits, and its
+   * reason says why it can't move; the Captain hears once per box.
+   */
+  private async leaveFullBox(row: TaskRow, boxId: string, full: string, needs: string): Promise<string | null> {
+    if (this.archiving.has(row.id)) return null
+    const stays = this.stayReason(row)
+    const project = this.store.getProject(row.project_id)
+    let viaGitHub = false
+    let block = stays
+    if (stays && project?.repo) {
+      const verdict = await this.pushedVerdictOf(row, boxId)
+      if (this.stopped) return null
+      if (verdict === "yes") viaGitHub = true
+      else block = `${stays}, and GitHub doesn't have all of it (${verdict.replace(/^no /, "")})`
+    }
+    if (!stays || viaGitHub) {
+      const other = await this.pickBox(row.id, boxId)
+      if (!other) return null
+      const current = this.store.getTaskRow(row.id)
+      // Re-checked: a turn may have started, or the folder moved, while it looked.
+      if (!current || current.box_id !== boxId || current.current_turn_id) return null
+      if (viaGitHub) {
+        if (current.archive_path) this.store.noteTaskArchiveUnavailable(row.id, current.archive_path, `out of date; workspace left full box ${boxId}, GitHub has all of it`)
+        this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [], archivePath: null, lastArchivedAt: null })
+      } else this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+      this.diskFull.delete(row.id)
+      void this.removeTaskDir(boxId, row.id).catch(() => {})
+      this.addEvent(
+        row.id,
+        viaGitHub
+          ? `Moved from ${boxId} to ${other}: ${full}. Nothing in its workspace was uncommitted or unpushed, so it starts there from a recap of the task on a fresh checkout of its branch.`
+          : `Moved from ${boxId} to ${other}: ${full}.`,
+      )
+      return this.assign(row.id, other)
+    }
+    this.setWaitReason(row.id, `Waiting for disk space on ${boxId}: ${full}, cleanup couldn't free the ${needs} this task's turn needs, and its workspace can't move: ${block}`)
+    if (this.diskWaitNoted.get(row.id) !== boxId) {
+      this.diskWaitNoted.set(row.id, boxId)
+      this.notice(
+        `⚠️ **${row.title}** is waiting for disk: ${full} and cleanup couldn't free enough. Its workspace can't move (${block}). Free space on the box, or have its work pushed, and it starts again.`,
+        { taskId: row.id },
+      )
+    }
+    return null
+  }
+
+  /**
+   * pushedCheck on a task's work folder ("yes", or "no <why>"), at most once a minute while the folder hasn't been
+   * active since: a task waiting for disk is placed again on every scheduling pass.
+   */
+  private async pushedVerdictOf(row: TaskRow, boxId: string): Promise<string> {
+    const hit = this.pushedSeen.get(row.id)
+    if (hit && hit.boxId === boxId && hit.activeAt === row.last_active_at && Date.now() - hit.at < 60_000) return hit.verdict
+    const res = await this.provider.exec(boxId, pushedCheck(`${this.taskDir(boxId, row.id)}/work`, row.id)).catch(() => null)
+    const verdict = res ? pushedVerdict(res.stdout) : "no check failed"
+    this.pushedSeen.set(row.id, { boxId, activeAt: row.last_active_at, at: Date.now(), verdict })
+    return verdict
   }
 
   /**
@@ -5469,7 +5601,7 @@ export class TaskManager {
         // 0 = this project's box, 1 = empty unowned box, 2 = another project's box
         const rank = mine ? 0 : others ? 2 : 1
         const limits = this.sizeLimits(normalizeBoxSize(b.size))
-        const maxResidentPerBox = this.residentCap(limits.maxResidentPerBox, projectId, residents)
+        const maxResidentPerBox = this.residentCap(limits.maxResidentPerBox, projectId, residents, normalizeBoxSize(b.size))
         return { id: b.id, rank, running: residents.filter(holdsSlot).length, residents: residents.length, slotsPerBox: limits.slotsPerBox, maxResidentPerBox }
       })
       .filter((b) => b.running < b.slotsPerBox)
@@ -5643,8 +5775,8 @@ export class TaskManager {
     // df failing shouldn't stop work; a real shortage shows up as ENOSPC and is retried.
     if (this.stopped || !space) return "ok"
     const need = this.diskNeed(row)
-    let pending = 0
-    for (const [id, bytes] of this.reserved.get(boxId) ?? []) if (id !== row.id) pending += bytes
+    // Workspaces being set up there, and what its running turns' folders have yet to grow by, aren't in df yet.
+    const pending = this.pendingDisk(boxId, row.id)
     if (space.freeBytes - pending >= need) {
       if (this.lowBoxes.delete(boxId)) this.emitBoxes()
       return "ok"
@@ -5786,15 +5918,24 @@ export class TaskManager {
 
   /**
    * Task folders a box may hold with this project's: the box's own limit, or less when the project or one with a
-   * folder there (`residents`) sets Tasks per box. The stricter wins, like Agents per box.
+   * folder there (`residents`) sets Tasks per box. The stricter wins, like Agents per box. A project that sets none
+   * gets as many as its measured workspaces fit the box's disk (`tasksPerBoxFor`).
    */
-  private residentCap(boxLimit: number, projectId: string | undefined, residents: TaskRow[]): number {
+  private residentCap(boxLimit: number, projectId: string | undefined, residents: TaskRow[], size: BoxSize): number {
     let cap = boxLimit
     for (const p of new Set([...(projectId ? [projectId] : []), ...residents.map((r) => r.project_id)])) {
-      const n = this.store.projectBoxLimits(p).tasksPerBox
+      const n = this.tasksPerBoxFor(p, size)
       if (n !== null && n < cap) cap = n
     }
     return cap
+  }
+
+  /**
+   * A project's Tasks per box on a box of `size`: its own setting, else as many of its workspaces as fit the box's
+   * disk with the free-space floor left (`foldersThatFit`, from its measured footprint), or null when neither says.
+   */
+  private tasksPerBoxFor(projectId: string, size: BoxSize): number | null {
+    return this.store.projectBoxLimits(projectId).tasksPerBox ?? this.foldersThatFit(projectId, size)
   }
 
   /**
@@ -5877,10 +6018,85 @@ export class TaskManager {
     this.meter.sample({ boxId, boxSize, memory, diskUsedBytes: Math.max(0, space.totalBytes - space.freeBytes), turns, diskOwner, now })
   }
 
-  /** Free disk a new workspace for `row` needs (Settings: the floor, or cloneFactor x its repo's last clone size). */
+  /**
+   * Free disk a new workspace for `row` needs: the largest of Settings' floor, cloneFactor x its repo's last clone
+   * size, and what its project's workspaces grow to (`expectedWorkspace`: the 14-day peak with headroom).
+   */
   private diskNeed(row: TaskRow | null): number {
     const s = this.settings.get()
-    return requiredFreeBytes({ minFreeMb: s.diskMinFreeMb, cloneFactor: s.diskCloneFactor }, row ? this.cloneBytes(row) : null)
+    const base = requiredFreeBytes({ minFreeMb: s.diskMinFreeMb, cloneFactor: s.diskCloneFactor }, row ? this.cloneBytes(row) : null)
+    return Math.max(base, row ? (this.expectedWorkspace(row.project_id) ?? 0) : 0)
+  }
+
+  /** A project's workspace footprint (shared/workspaceDisk.ts): its biggest task folder of the last 14 days, or null. */
+  workspaceFootprint(projectId: string): WorkspaceFootprint | null {
+    if (!this.footprintCache.has(projectId)) this.footprintCache.set(projectId, workspaceFootprint(this.store.workspaceSizes(projectId)))
+    return this.footprintCache.get(projectId) ?? null
+  }
+
+  /** The disk one of a project's workspaces is expected to take (its footprint with headroom), or null when unmeasured. */
+  private expectedWorkspace(projectId: string): number | null {
+    return expectedWorkspaceBytes(this.workspaceFootprint(projectId))
+  }
+
+  /**
+   * What a task folder on `boxId` may still grow by: its project's expected footprint less its last reading there
+   * (or, unmeasured, its repo's clone size).
+   */
+  private workspaceGrowth(row: TaskRow, boxId: string): number {
+    return workspaceGrowth(this.expectedWorkspace(row.project_id), this.store.workspaceSizeOn(row.id, boxId) ?? this.cloneBytes(row))
+  }
+
+  /**
+   * Disk on a box that free space doesn't show is spoken for yet: workspaces being set up there (`reserved`), and what
+   * the folders of turns running or starting there may still grow by. `except` (the task being placed) is left out.
+   */
+  private pendingDisk(boxId: string, except?: string): number {
+    let pending = 0
+    const counted = new Set<string>()
+    for (const [id, bytes] of this.reserved.get(boxId) ?? []) {
+      counted.add(id)
+      if (id !== except) pending += bytes
+    }
+    for (const r of this.store.listTaskRows({ boxId })) {
+      if (r.id === except || counted.has(r.id) || !holdsSlot(r)) continue
+      pending += this.workspaceGrowth(r, boxId)
+    }
+    return pending
+  }
+
+  /**
+   * Task folders of a project a box of `size` holds by its disk: its work disk less the free-space floor, over the
+   * project's expected footprint. Null when unmeasured.
+   */
+  private foldersThatFit(projectId: string, size: BoxSize): number | null {
+    const total = Number(this.store.getKv(diskTotalKey(size)) ?? NaN)
+    const disk = workDiskBytes(size, Number.isFinite(total) && total > 0 ? total : null)
+    return workspacesThatFit(disk, this.settings.get().diskMinFreeMb * 1024 * 1024, this.expectedWorkspace(projectId))
+  }
+
+  /**
+   * Measure a task folder's size on its box after a turn (du), for its project's footprint. Upstash and other cloud
+   * boxes only: a folder on this computer or an SSH machine doesn't take a box's disk.
+   */
+  private async measureWorkspace(taskId: string, boxId: string) {
+    if (!this.store.getBox(boxId) || this.stopped) return
+    const row = this.store.getTaskRow(taskId)
+    if (!row || row.box_id !== boxId) return
+    const res = await this.provider.exec(boxId, workspaceDuCommand(this.taskDir(boxId, taskId))).catch(() => null)
+    if (this.stopped || !res || res.exitCode !== 0) return
+    const bytes = parseWorkspaceDu(res.stdout)
+    // The folder may have left the box meanwhile (parked, moved): a reading only counts for where it is.
+    if (bytes === null || this.store.getTaskRow(taskId)?.box_id !== boxId) return
+    this.noteWorkspaceSize(taskId, boxId, bytes)
+  }
+
+  /** Record a task folder's size on its box (workspace_sizes) for its project's footprint. */
+  noteWorkspaceSize(taskId: string, boxId: string, bytes: number) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row) return
+    this.store.recordWorkspaceSize({ taskId, projectId: row.project_id, boxId, bytes })
+    this.footprintCache.delete(row.project_id)
   }
 
   /** The task's repo's last measured clone size, if Box Yard has cloned it before. */
@@ -6005,17 +6221,19 @@ export class TaskManager {
    * unpushed (the janitor checked), so GitHub has all of it. An older archive is let go too: the next message starts
    * from a recap of the task instead of an out-of-date session.
    */
-  private async dropPushed(taskId: string, boxId: string) {
+  private async dropPushed(taskId: string, boxId: string, why: "merged" | "pushed" = "merged") {
     const row = this.store.getTaskRow(taskId)
     if (!row) return
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [], archivePath: null, lastArchivedAt: null }, { touch: false })
-    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, "out of date; workspace removed after its PR merged")
+    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, why === "merged" ? "out of date; workspace removed after its PR merged" : "out of date; workspace removed with nothing unpushed")
     await this.removeTaskDir(boxId, taskId)
     const pr = prNumber(row.pr_url)
-    console.log(`[box-yard] removed workspace ${taskId} from ${boxId} without an archive: PR${pr ? ` #${pr}` : ""} merged, nothing unpushed`)
+    console.log(`[box-yard] removed workspace ${taskId} from ${boxId} without an archive: ${why === "merged" ? `PR${pr ? ` #${pr}` : ""} merged, ` : ""}nothing unpushed`)
     this.addEvent(
       taskId,
-      `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`,
+      why === "merged"
+        ? `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`
+        : `Workspace removed from box ${boxId} to free disk, without an archive: nothing in it was uncommitted, stashed or unpushed, so GitHub has all of it${row.branch ? ` (branch ${row.branch})` : ""}. The next message starts from a recap on a fresh checkout of its branch.`,
     )
     this.emitTask(taskId)
   }
@@ -6461,6 +6679,9 @@ export class TaskManager {
       // Its sub-tasks' reports in this prompt are delivered now, and a moved task's folder has no subtasks.json yet.
       if (this.store.subtaskRows(taskId).length) this.syncSubtasks(taskId)
       this.diskRetried.delete(taskId)
+      this.diskFull.delete(taskId)
+      this.diskWaitNoted.delete(taskId)
+      this.pushedSeen.delete(taskId)
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
       // Hooks whose prompts are in this turn (a retried turn keeps the interrupted one's), so they don't fire on it.
@@ -6469,7 +6690,7 @@ export class TaskManager {
         status: "working",
         sessionStarted: true,
         ...(compact ? { compacting: true, compactPending: false } : { turnCount: row.turn_count + 1 }),
-        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, oomRetries: flags.oomRetries, loginRetries: flags.loginRetries, ...(hookIds.length ? { hookIds } : {}), ...(trigger ? { trigger, prBefore } : {}) } as TurnFlags,
+        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, oomRetries: flags.oomRetries, loginRetries: flags.loginRetries, diskRetries: flags.diskRetries, ...(hookIds.length ? { hookIds } : {}), ...(trigger ? { trigger, prBefore } : {}) } as TurnFlags,
         lastActiveAt: Date.now(),
         question: null,
       })
@@ -6531,19 +6752,24 @@ export class TaskManager {
         this.schedule()
         return
       }
-      const outOfSpace = !stopped && isOutOfSpace(message)
+      // A full box fails a launch with whatever broke first ("Failed to write file" from Upstash's file API, a git
+      // write error): with next to nothing free, that's the disk.
+      const boxDisk = !stopped && !local && this.store.getBox(boxId) ? await this.probeDisk(boxId, 0) : null
+      if (this.stopped) return
+      const outOfSpace = !stopped && diskFailure(message, boxDisk?.freeBytes)
       // The disk cleanup and its retry are for boxes: the janitor never touches this computer.
       if (outOfSpace && !local && !wasCompact && !this.diskRetried.has(taskId)) {
         this.store.finishTaskTurn(turnId, { status: "failed", error: message })
-        await this.retryAfterOutOfSpace(current, boxId, fresh)
+        await this.retryAfterOutOfSpace(current, boxId, fresh, boxDisk)
         return
       }
       if (outOfSpace && local) message = `this computer is out of disk space. Free some space on it, then retry. ${message}`
       else if (outOfSpace) {
         this.diskRetried.delete(taskId)
         this.diskHold.delete(taskId)
-        const space = await this.probeDisk(boxId, 0)
-        message = `box ${boxId} is out of disk space${space ? ` (${diskLine({ freeBytes: space.freeBytes, totalBytes: space.totalBytes })})` : ""}, even after cleaning it up and retrying. Free space on it or add a box, then retry. ${message}`
+        // Its next try waits for room here, or moves (residentDisk), instead of failing on this box again.
+        if (!fresh) this.diskFull.set(taskId, boxId)
+        message = `${outOfDiskText(boxId, boxDisk)}, even after cleaning it up and retrying. Free space on it or add a box, then retry. ${message}`
       }
       this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       const prev = current.compact_prev_status
@@ -6577,8 +6803,9 @@ export class TaskManager {
    * on another box if one has room; an existing workspace waits for the cleanup
    * on its own box. The task stays queued with a visible reason meanwhile.
    */
-  private async retryAfterOutOfSpace(row: TaskRow, boxId: string, fresh: boolean) {
+  private async retryAfterOutOfSpace(row: TaskRow, boxId: string, fresh: boolean, space: DiskSpace | null) {
     this.diskRetried.add(row.id)
+    if (!fresh) this.diskFull.set(row.id, boxId)
     this.diskCache.delete(boxId)
     this.lowBoxes.add(boxId)
     const need = this.diskNeed(row)
@@ -6599,8 +6826,8 @@ export class TaskManager {
     })
     this.addEvent(
       row.id,
-      `Box ${boxId} ran out of disk space while ${fresh ? "setting up the workspace" : "starting the turn"}. ` +
-        `Cleaning it up and retrying once${fresh ? ", on another box if one has room" : " when the cleanup is done"}.`,
+      `Box ${boxId} ran out of disk space while ${fresh ? "setting up the workspace" : "starting the turn"}${space ? ` (${diskLine({ freeBytes: space.freeBytes, totalBytes: space.totalBytes })})` : ""}. ` +
+        `Cleaning it up and retrying once${fresh ? ", on another box if one has room" : " when the cleanup is done, or on another box if its work can move"}.`,
     )
     this.emitTask(row.id)
     this.emitBoxes()
@@ -7844,6 +8071,8 @@ export class TaskManager {
     this.returnSteer(row)
     // Auto-sizing: what the turn used on its box, and whether it ran out of memory there.
     const measured = this.recordTurnPeak(row.current_turn_id, ev, !ev.ok && !ev.stopped && !this.stopRequested.has(row.id))
+    // Its folder's size on the box now, for its project's workspace footprint (what placement reserves for the next).
+    if (row.box_id) void this.measureWorkspace(row.id, row.box_id)
     const timing = this.recordTurnTiming(row, ev)
     const unknownModel = this.unknownModelError(row, ev)
     if (row.compacting) return this.finishCompact(row, ev)
@@ -7868,6 +8097,14 @@ export class TaskManager {
       const failure = !stopped && !ev.ok ? this.logins.reportFailure(login.id, login.harness, String(ev.error ?? "")) : null
       if (!uncertain && failure && !flags.loginRetries && this.logins.hasUsable(login.harness, login.id)) return this.retryOnNextLogin(row, ev, flags, login, failure.kind)
     }
+    // Out of disk on its box (the error says so, or the box is all but full): cleaned up, and carried on once there or
+    // on another box (residentDisk) instead of failing; a second time it fails, its error naming the full box.
+    const turnBox = row.box_id ? this.store.getBox(row.box_id) : undefined
+    const diskOut = !uncertain && !stopped && !ev.ok && Boolean(turnBox) && diskFailure(String(ev.error ?? ""), turnBox!.disk_free_bytes)
+    if (diskOut) {
+      this.ranOutMidTurn(row)
+      if (!flags.diskRetries) return this.retryAfterDiskFull(row, ev, flags)
+    }
 
     // A merged PR means the work landed; a closed one means there's no PR to review.
     // (The tracker already wrote "Pull request ... was merged" to the transcript when it saw the change.)
@@ -7884,6 +8121,7 @@ export class TaskManager {
       status = "failed"
       error = unknownModel ?? String(ev.error ?? "The agent exited with an error.")
       if (oom && "why" in oom) error = `It ran out of memory on its ${measured!.boxSize} box, and isn't retried on a bigger one: ${oom.why}. ${error}`
+      if (diskOut) error = `${capitalize(outOfDiskText(turnBox!.id, diskOf(turnBox!)))} again after carrying on once; free space on it or add a box, then retry. ${error}`
     } else if (flags.asked) status = "needs_input"
     // Only Cody marks a task done. An agent that called finish rests like any finished turn, ready for review (idle,
     // or pr_ready with an open PR), so it stays in Cody's lists until Cody marks it done. It no longer waits on replies.
@@ -8066,6 +8304,48 @@ export class TaskManager {
     this.emitTask(row.id)
     this.publishDirectory()
     // The workspace goes to its archive first, so the move to the bigger box loses nothing.
+    void this.archive(row.id).finally(() => this.schedule())
+  }
+
+  /** A turn ran out of disk on its box: the box is cleaned up, and the task's next turn there needs the full floor. */
+  private ranOutMidTurn(row: TaskRow) {
+    const boxId = row.box_id!
+    this.diskFull.set(row.id, boxId)
+    this.diskCache.delete(boxId)
+    this.lowBoxes.add(boxId)
+    this.janitor.ensure(boxId, Math.max(this.diskNeed(row), this.diskNeed(null)), "out-of-space", true)
+    this.emitBoxes()
+  }
+
+  /**
+   * A turn that failed because its box ran out of disk: queued again to carry on in the same session once there's
+   * room. Its placement (residentDisk) waits for the cleanup on the box, moves it when its work is safe elsewhere, or
+   * holds it with the reason. Once in a row; a second one fails, naming the full box.
+   */
+  private retryAfterDiskFull(row: TaskRow, ev: WorkerEvent, flags: TurnFlags) {
+    const error = String(ev.error ?? "The agent exited with an error.")
+    const box = this.store.getBox(row.box_id!)
+    const full = outOfDiskText(row.box_id!, box ? diskOf(box) : null)
+    const turnCost = this.recordTaskClaudeUsage(row, ev)
+    this.store.finishTaskTurn(row.current_turn_id!, { status: "interrupted", costUsd: turnCost, error })
+    this.store.queueInput(
+      row.id,
+      "system",
+      `Your previous turn stopped because ${full}: ${error.slice(0, 300)}. Box Yard freed space (or moved you to another box) and you carry on now. Check where things stand (git status, files, any install or build that was cut off) and continue the task. Keep the disk in mind: remove build output and caches you don't need, and don't keep several copies of large files.`,
+    )
+    this.store.updateTask(row.id, {
+      status: "queued",
+      error: null,
+      currentTurnId: null,
+      ...usageFields(ev.usage),
+      sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
+      turnFlags: { interrupts: flags.interrupts ?? 0, diskRetries: (flags.diskRetries ?? 0) + 1, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}), ...carriedTrigger(flags) },
+    })
+    if (row.box_id) this.store.touchBox(row.box_id)
+    this.addEvent(row.id, `Turn ${row.turn_count} stopped: ${full}. Cleaning the box up; the task carries on once there's room, or on another box if its work can move.`)
+    this.notice(`⚠️ **${row.title}** ran out of disk: ${full}. It carries on once cleanup frees room there, or on another box if its work can move.`, { taskId: row.id })
+    this.emitTask(row.id)
+    this.publishDirectory()
     void this.archive(row.id).finally(() => this.schedule())
   }
 
@@ -9748,6 +10028,7 @@ export class TaskManager {
     this.lowBoxes.delete(boxId)
     this.idleHeld.delete(boxId)
     for (const [taskId, held] of this.diskHold) if (held === boxId) this.diskHold.delete(taskId)
+    for (const [taskId, held] of this.diskFull) if (held === boxId) this.diskFull.delete(taskId)
     for (const row of this.store.listTaskRows({ boxId })) {
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
       if (row.current_turn_id) await this.interrupt(this.requireRow(row.id), reason)

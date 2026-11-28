@@ -42,6 +42,7 @@
 // A line "message captain: <msg>" sends <msg> with message_captain (fire-and-forget); "message captain wait: <msg>"
 // or "message captain wait <seconds>: <msg>" waits (default 30 s). The final reply quotes each tool result.
 // [hang] keeps the turn running for two minutes (until it's stopped, or a steer comes in).
+// [enospc] fails the turn the way a full disk does ("ENOSPC: no space left on device").
 // Steers: with `--input-format stream-json` the turn's prompt is the first user message on stdin, and each later one
 // is a steer the worker reads at its next step (after its [slow] wait, around its Bash call, before its reply), as the
 // real CLI folds them in between tool calls; it says so ("Steered mid-turn: …") and the turn's result quotes them.
@@ -679,6 +680,10 @@ async function worker(mcp, prompt) {
   if (tree !== null) return tree
   const noop = /\[noop\]/i.test(prompt)
   const markNoop = () => useTool(mcp, "finish", { summary: "Nothing to do this run.", outcome: "noop" })
+  if (/\[enospc\]/i.test(prompt)) {
+    console.error("Error: ENOSPC: no space left on device, write")
+    process.exit(3)
+  }
   if (/\[fail\]/i.test(prompt)) {
     if (noop) await markNoop()
     console.error("fake failure requested by the fail marker")
