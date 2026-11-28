@@ -8,9 +8,10 @@ export const isLocalBox = (boxId: string) => boxId.startsWith("local-")
 export type ActivePool = "local" | "upstash" | "agent37"
 
 /**
- * The provider unless BOX_PROVIDER=upstash or local: new boxes come from `active()`, which reads Settings and the keys
- * on each use (Upstash once its key is saved, Agent37 when Settings › Box providers › Agent37 boxes picks it and its
- * key is there, folders on this machine until then), with no restart. Every box keeps going to the provider that made
+ * The provider unless BOX_PROVIDER=local: new boxes come from `active()` (poolSource in server/boxPool.ts), which
+ * reads the BOX_PROVIDER pin, Settings and the keys on each use (Upstash once its key is saved, Agent37 when Settings ›
+ * Box providers › Agent37 boxes picks it and its key is there, folders on this machine until then), with no restart. A
+ * task or project bound to one cloud asks `create` for it by `pool`, whatever the default. Every box keeps going to the provider that made
  * it, by its id (`local-…`, `agent37-…`, else Upstash), so switching providers or removing a key never strands a box.
  */
 export class AutoProvider implements BoxProvider {

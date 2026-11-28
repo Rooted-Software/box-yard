@@ -31,6 +31,11 @@ export interface SetupStatus {
     provider: string
     /** False when BOX_PROVIDER=local (or mock mode) keeps every box on the server's machine. */
     required: boolean
+    /**
+     * "BOX_PROVIDER=upstash in the server's env pins this yard's new pool boxes to Upstash Box": the env overrides
+     * Settings › Box providers' pick. Absent when Settings decides.
+     */
+    pin?: string
   }
   claude: {
     required: boolean

@@ -24,7 +24,9 @@ Projects keep their **Runs on: Upstash box** setting, and the name stays for now
 | `AGENT37_TEMPLATE` | The template new instances start from. Default `agent37-base` (Node, Python, git and build tools). A workspace template of your own (`my-worker` or `my-worker@3`) can have Claude Code and your tools baked in, so setup is quicker. Build one with `npx agent37 templates build`. |
 | `AGENT37_IDLE_SLEEP_SECONDS` | How long an idle box waits before it sleeps, from 300 to 86400. Default 900. |
 
-`BOX_PROVIDER=upstash` and `BOX_PROVIDER=local` still pin boxes to Upstash or this machine, and then the Settings choice does nothing. With `UPSTASH_BOX_API_KEY` in the environment and no `BOX_PROVIDER`, new boxes stay on Upstash until Settings picks Agent37 and Agent37 has a key.
+`BOX_PROVIDER=local` keeps every box on this machine, and then neither cloud is used: a task or project set to Agent37 waits and says `BOX_PROVIDER=local` is why. `BOX_PROVIDER=upstash` (or `agent37`) pins only the yard's default: Settings' **New pool boxes come from** shows the pin and doesn't apply, but tasks and projects set to the other cloud ([below](#one-task-or-one-project-on-agent37)) still get its boxes once it has a key. With `UPSTASH_BOX_API_KEY` in the environment and no `BOX_PROVIDER`, new boxes stay on Upstash until Settings picks Agent37 and Agent37 has a key.
+
+A yard deployed with `./yard deploy-box` sets no `BOX_PROVIDER` (older deploys wrote `BOX_PROVIDER=upstash`; a redeploy rewrites its `.env` without it). It defaults to Upstash through `UPSTASH_BOX_API_KEY`, and Settings can switch it to Agent37.
 
 ## One task or one project on Agent37
 
@@ -69,7 +71,8 @@ You don't have to move the whole yard. Agent37 needs its key (step 3 above); aft
   - a box made from the snapshot is a fork of that fork;
   - deleting the snapshot deletes the fork, and Box Yard refuses to delete any instance that isn't one of its snapshots.
 - **Resize.** The provider can resize an instance in place (cpu and memory either way, disk only up), but the yard resizes by migration, as on Upstash. That's because one yard can hold boxes on both clouds.
-- **Leftovers and reconcile.** The orphan sweep looks for this install's label on every cloud with a key, so a switch leaves nothing behind. Snapshot forks are never swept. Reconcile lists the workspace's instances to notice a box deleted in Agent37's dashboard.
+- **Leftovers and reconcile.** The orphan sweep looks for this install's label on every cloud with a key, so a switch leaves nothing behind. Snapshot forks are never swept. Reconcile lists the workspace's Box Yard boxes (`boxyard=box`) to notice one deleted in Agent37's dashboard.
+- **Other instances are left alone.** The workspace can hold instances other processes made. Box Yard lists, sweeps and deletes only its own: the sweep needs `boxyard=box` and this install's label, reconcile reads only `boxyard=box` instances, and a delete of an instance without Box Yard's box metadata is refused (a snapshot delete needs `boxyard=snapshot`).
 - **Auto-sizing** doesn't measure Agent37 boxes yet. Each instance has its own cgroup, but it's cgroup v1 and Box Yard's probe reads v2 files, so the provider doesn't claim its own cgroup. A project's own Box size, or Settings' size, applies instead.
 - **Cost.** Agent37 bills a running instance by the minute, whatever its CPU does. Box Yard's compute figure for a box is Agent37's own charge from `GET /v1/usage`, per instance. Agent37 settles that hourly, so it can be up to an hour behind. Box Yard doesn't price Agent37 boxes by CPU time at Upstash's rates. Disk is still metered at Settings › Usage's storage rate on top, which counts disk Agent37 already bills; that's cents a month per box.
 

@@ -56,7 +56,13 @@ export function Agent37Panel({ fid, settings }: { fid: (k: string) => string; se
               )
             })}
           </div>
-          {pool === "agent37" && s?.credentials.agent37ApiKey?.state !== "set" && (
+          {s?.boxes.pin && (
+            <p className="mt-2 text-xs leading-relaxed text-amber-300" data-testid="box-pool-pin">
+              {s.boxes.pin}, so this choice doesn't apply until it's removed from the env and Box Yard restarts.
+              {!s.boxes.pin.startsWith("BOX_PROVIDER=local") && " Tasks and projects set to the other cloud (Project › Settings › Box cloud, or @agent37) still get its boxes once it has a key."}
+            </p>
+          )}
+          {!s?.boxes.pin && pool === "agent37" && s?.credentials.agent37ApiKey?.state !== "set" && (
             <p className="mt-2 text-xs leading-relaxed text-amber-300" data-testid="agent37-no-key">
               Add the Agent37 API key above: until then new boxes don't come from Agent37.
             </p>

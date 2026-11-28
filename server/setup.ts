@@ -10,6 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { Box } from "@upstash/box"
 import type { Config } from "./config.js"
+import { cloudProblem, pinNote, poolSource, type PoolSource } from "./boxPool.js"
 import { BadRequestError, type Store } from "./store.js"
 import { credentialValueFor, redact, type CodexLogin, type CredentialStore } from "./credentials.js"
 import { codexExecArgs, CodexStream, isRefreshOf, seedCodexAuth } from "./codex.js"
@@ -200,10 +201,10 @@ export class Setup {
       return cursorKey ? null : noCursorKey
     }
     if (runner === "box") {
-      if (boxCloud === "agent37" || (!boxCloud && this.onAgent37())) {
-        if (creds.agent37ApiKey.state !== "set") return "Agent37 boxes aren't set up: add an Agent37 API key in Settings › Box providers › Agent37 boxes"
-      } else if ((boxCloud === "upstash" || c.boxProvider !== "local") && creds.upstashBoxApiKey.state !== "set") return "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Box providers › Upstash boxes"
       // BOX_PROVIDER=local's "boxes" are folders on this computer, where its own cursor-agent login works.
+      const cloud = boxCloud ?? (c.boxProvider === "local" ? null : this.onAgent37() ? "agent37" : "upstash")
+      const problem = cloud && cloudProblem(c, (k) => creds[k].state === "set", cloud)
+      if (problem) return problem
       return cursorKey || c.boxProvider === "local" ? null : noCursorKey
     }
     if (cli === "opencode") {
@@ -273,12 +274,13 @@ export class Setup {
       restart.push("BOX_PROVIDER=local keeps every box on the server's machine. Unset it and restart Box Yard to use Upstash boxes.")
     }
     const info = this.d.settings.info()
+    const pin = pinNote(this.poolSource())
     return {
       ready: missing.length === 0,
       missing,
       mock,
       credentials: creds,
-      boxes: { provider: this.d.provider(), required: boxesRequired },
+      boxes: { provider: this.d.provider(), required: boxesRequired, ...(pin ? { pin } : {}) },
       claude: {
         required: !mock,
         state: claudeSet ? "set" : "unset",
@@ -374,17 +376,19 @@ export class Setup {
     return `Cursor accepted the key: ${r.text}.`
   }
 
-  /**
-   * New pool boxes come from Agent37 (makeProvider in server/app.ts): BOX_PROVIDER=agent37, or Settings › Box providers ›
-   * Agent37 boxes picks it, unless BOX_PROVIDER fixes boxes elsewhere. With UPSTASH_BOX_API_KEY in the env, a pick of
-   * Agent37 counts once Agent37 has a key (until then boxes stay on Upstash).
-   */
-  private onAgent37(): boolean {
+  /** Where new pool boxes come from (server/boxPool.ts, as makeProvider's `active()`), and any BOX_PROVIDER pin. */
+  poolSource(): PoolSource {
     const { c, credentials } = this.d
-    if (c.mock || c.boxProvider === "local" || c.boxProvider === "upstash") return false
-    if (c.provider === "agent37") return true
-    if (this.d.settings.get().boxPool !== "agent37") return false
-    return c.provider !== "upstash" || Boolean(credentials.get("agent37ApiKey"))
+    return poolSource(c, (k) => Boolean(credentials.get(k)), this.d.settings.get().boxPool)
+  }
+
+  /** Agent37 is the pool's cloud, so its key is the one boxes need: it makes them, or Settings picks it before its key is there. */
+  private onAgent37(): boolean {
+    const { c } = this.d
+    const src = this.poolSource()
+    if (src.pool === "agent37" || src.pin === "agent37") return true
+    // With UPSTASH_BOX_API_KEY in the env, boxes stay on Upstash until Agent37 has a key.
+    return !src.pin && !c.mock && c.provider !== "upstash" && this.d.settings.get().boxPool === "agent37"
   }
 
   /** List the workspace's instances: free, and it never makes anything. */

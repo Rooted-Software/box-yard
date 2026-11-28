@@ -36,6 +36,7 @@ import { Redis } from "./redis.js"
 import { LocalProvider, LocalRunnerProvider, LocalRunnerRouter } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
 import { AutoProvider, type ActivePool } from "./providers/auto.js"
+import { poolSource } from "./boxPool.js"
 import { Agent37Provider } from "./providers/agent37.js"
 import { BOX_POOLS, type BoxPool } from "../shared/agent37.js"
 import type { BoxProvider } from "./providers/types.js"
@@ -387,28 +388,23 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
 }
 
 /**
- * BOX_PROVIDER=upstash fixes boxes on Upstash and BOX_PROVIDER=local on this machine, as before. Otherwise new boxes come
- * from Settings › Box providers' pool (Upstash Box or Agent37, docs/agent37.md) once that cloud has a key, else folders
- * on this machine, with no restart: UPSTASH_BOX_API_KEY in the env keeps them on Upstash unless Settings picks Agent37,
- * and BOX_PROVIDER=agent37 keeps them on Agent37. Every box keeps going to the provider that made it. Without
- * `credentials` (scripts), only the env counts.
+ * BOX_PROVIDER=local keeps boxes on this machine, as before. Otherwise new boxes come from `poolSource`
+ * (server/boxPool.ts): BOX_PROVIDER=upstash or agent37 pins the default cloud, else Settings › Box providers' pool
+ * (Upstash Box or Agent37, docs/agent37.md) once that cloud has a key, else folders on this machine, with no restart.
+ * UPSTASH_BOX_API_KEY in the env keeps them on Upstash unless Settings picks Agent37. A pin only sets the default: a
+ * task or project that asks for the other cloud (runs_on agent37, a project's Box cloud) gets it once that cloud has a
+ * key. Every box keeps going to the provider that made it. Without `credentials` (scripts), only the env counts.
  */
 export function makeProvider(c: Config, credentials?: CredentialStore, pool: () => BoxPool = () => "upstash"): BoxProvider {
   const agent37 = (creds: { get(k: "agent37ApiKey"): string }) =>
     new Agent37Provider(creds, { template: c.agent37Template, idleSleepSeconds: c.agent37IdleSleepSeconds, workerSize: () => c.workerSize })
-  if (c.provider === "upstash" && (c.boxProvider === "upstash" || !credentials)) return new UpstashProvider(c, credentials)
+  if (c.provider === "upstash" && !credentials) return new UpstashProvider(c)
   if (c.provider === "agent37" && !credentials) return agent37({ get: () => c.agent37ApiKey })
   const local = new LocalProvider(path.join(c.dataDir, "local-boxes"), c.claudeBin)
   if (!credentials || c.mock || c.boxProvider === "local") return local
   const has = (k: "upstashBoxApiKey" | "agent37ApiKey") => Boolean(credentials.get(k))
   const keyed = (): ActivePool[] => [...(has("upstashBoxApiKey") ? ["upstash" as const] : []), ...(has("agent37ApiKey") ? ["agent37" as const] : [])]
-  const onAgent37 = () => (has("agent37ApiKey") ? "agent37" : "local")
-  const active = (): ActivePool => {
-    if (c.provider === "agent37") return onAgent37()
-    if (pool() === "agent37") return c.provider === "upstash" && !has("agent37ApiKey") ? "upstash" : onAgent37()
-    return c.provider === "upstash" || has("upstashBoxApiKey") ? "upstash" : "local"
-  }
-  return new AutoProvider(local, new UpstashProvider(c, credentials), active, agent37(credentials), keyed)
+  return new AutoProvider(local, new UpstashProvider(c, credentials), () => poolSource(c, has, pool()).pool, agent37(credentials), keyed)
 }
 
 /** The local runner: agents of "Runs on: This computer" projects, in `<localDir>/<task_id>` (BOXYARD_LOCAL_DIR). */
@@ -973,7 +969,7 @@ export function createBoxYard(
       timezone: { value: c.defaultTimezone, envVar: "BOXYARD_TIMEZONE" },
       maxUploadMb: { value: c.maxUploadMb, envVar: "BOXYARD_MAX_UPLOAD_MB" },
       scheduler: { value: scheduler.mode, envVar: "QSTASH_TOKEN", note: "qstash when QSTASH_TOKEN is set, else local" },
-      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else the boxPool setting (upstash or agent37) once that cloud has a key in Settings › Box providers" },
+      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER=local keeps boxes on this machine; BOX_PROVIDER=upstash or agent37 pins the default cloud, but tasks and projects set to the other cloud still get it once it has a key; else the boxPool setting (upstash or agent37) once that cloud has a key in Settings › Box providers" },
       localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
     }),
     save: { settings: saveSettings, runpod: saveRunpodSettings, vast: saveVastSettings, daytona: saveDaytonaSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },

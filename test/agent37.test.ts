@@ -8,6 +8,7 @@ import { AutoProvider } from "../server/providers/auto.js"
 import { LocalProvider } from "../server/providers/local.js"
 import { providerOf, type BoxProvider } from "../server/providers/types.js"
 import { makeProvider } from "../server/app.js"
+import { cloudProblem, pinNote, poolSource } from "../server/boxPool.js"
 import { CredentialStore } from "../server/credentials.js"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
@@ -258,7 +259,31 @@ describe("Agent37 instances", () => {
     expect(await p.listIds("inst-abc")).toEqual(["agent37-mine000001"])
     // Not a prefix match: "inst-ab" is another install.
     expect(await p.listIds("inst-ab")).toEqual([])
-    expect((await p.liveIds()).sort()).toEqual(["agent37-hand000001", "agent37-mine000001", "agent37-other00001"])
+    // Reconcile reads only Box Yard's boxes: the instance someone made by hand isn't listed.
+    expect((await p.liveIds()).sort()).toEqual(["agent37-mine000001", "agent37-other00001"])
+  })
+
+  it("never deletes an instance Box Yard didn't make: the workspace holds other processes' instances too", async () => {
+    const f = fakeAgent37({
+      instances: [
+        { id: "hand000001", status: "running", metadata: null },
+        { id: "tool000001", status: "sleeping", metadata: { owner: "another-tool" } },
+        { id: "snap000001", status: "stopped", metadata: { boxyard: "snapshot" } },
+      ],
+    })
+    const { p } = provider(f)
+    for (const id of ["hand000001", "tool000001", "snap000001"]) {
+      await expect(p.destroy(boxIdOf(id))).rejects.toThrow(`Agent37 instance ${id} isn't a Box Yard box; not deleting it`)
+      expect(f.instances.get(id)!.status).not.toBe("deleted")
+    }
+    expect(f.calls.filter((c) => c.method === "DELETE")).toEqual([])
+    // Nothing foreign is listed for the orphan sweep or reconcile either.
+    expect(await p.listIds("inst-abc")).toEqual([])
+    expect(await p.liveIds()).toEqual([])
+    // Its own boxes still go.
+    const { boxId, id } = await made(f, p)
+    await p.destroy(boxId)
+    expect(f.instances.get(id)!.status).toBe("deleted")
   })
 
   it("maps Agent37's statuses to health, wakes a sleeping or stopped box, and counts a 404 as gone", async () => {
@@ -538,7 +563,7 @@ describe("choosing Agent37 for pool boxes", () => {
     // UPSTASH_BOX_API_KEY in the env: Upstash, until Settings picks Agent37 and it has a key.
     const fromEnv = makeProvider({ ...live, provider: "upstash", boxProvider: "" }, new CredentialStore(store, { upstashBoxApiKey: "up_key" }), () => "agent37")
     expect(fromEnv.name).toBe("upstash")
-    // BOX_PROVIDER=upstash and =local still fix it.
+    // BOX_PROVIDER=upstash pins the default to Upstash, whatever Settings says; =local keeps every box here.
     expect(makeProvider({ ...live, provider: "upstash", boxProvider: "upstash" }, creds, () => "agent37").name).toBe("upstash")
     expect(makeProvider({ ...live, boxProvider: "local" }, creds, () => "agent37")).toBeInstanceOf(LocalProvider)
     // BOX_PROVIDER=agent37: Agent37 once it has a key, whatever Settings says; without credentials, Agent37 alone.
@@ -546,6 +571,61 @@ describe("choosing Agent37 for pool boxes", () => {
     expect(makeProvider({ ...live, provider: "agent37", boxProvider: "agent37" })).toBeInstanceOf(Agent37Provider)
     expect(boxIdOf("ab12cd34ef")).toBe("agent37-ab12cd34ef")
     db.close()
+  })
+
+  it("BOX_PROVIDER=upstash (a deploy-box yard) pins only the default: tasks and projects can still ask for Agent37", () => {
+    const c = testConfig()
+    const db = openDb(c.dataDir)
+    const store = new Store(db)
+    const env: { upstashBoxApiKey?: string; agent37ApiKey?: string } = { upstashBoxApiKey: "up_key" }
+    const live = { ...c, mock: false, claudeBin: FAKE_CLAUDE }
+    const pinned = makeProvider({ ...live, provider: "upstash", boxProvider: "upstash" }, new CredentialStore(store, env), () => "agent37")
+    expect(pinned).toBeInstanceOf(AutoProvider)
+    expect(pinned.name).toBe("upstash")
+    // No Agent37 key yet: only Upstash, and a create asked for Agent37 says it has no key.
+    expect(pinned.pools?.()).toEqual(["upstash"])
+    expect(() => pinned.create({ labels: ["boxyard"], pool: "agent37" })).toThrow(/Agent37 boxes aren't set up: it has no API key/)
+    // The Agent37 key is saved: the default stays Upstash, and a task or project bound to Agent37 can grow there.
+    env.agent37ApiKey = KEY
+    expect(pinned.name).toBe("upstash")
+    expect(pinned.pools?.()).toEqual(["upstash", "agent37"])
+    // Its Agent37 boxes go to Agent37, and the sweep looks on both clouds.
+    expect(providerOf(pinned, "agent37-ab12cd34ef")).toBeInstanceOf(Agent37Provider)
+
+    // BOX_PROVIDER=agent37 with an Upstash key: the same the other way round.
+    const onAgent37 = makeProvider({ ...live, provider: "agent37", boxProvider: "agent37" }, new CredentialStore(store, { upstashBoxApiKey: "up_key", agent37ApiKey: KEY }), () => "upstash")
+    expect(onAgent37.name).toBe("agent37")
+    expect(onAgent37.pools?.()).toEqual(["upstash", "agent37"])
+    db.close()
+  })
+
+  it("says where new pool boxes come from and which env pin decides it", () => {
+    const keys = (...k: string[]) => (key: "upstashBoxApiKey" | "agent37ApiKey") => k.includes(key)
+    const env = (boxProvider: string, provider: "upstash" | "local" | "agent37" = "upstash") => ({ mock: false, provider, boxProvider })
+    // A deploy-box yard before this fix: pinned to Upstash over Settings' Agent37.
+    const pinned = poolSource(env("upstash"), keys("upstashBoxApiKey", "agent37ApiKey"), "agent37")
+    expect(pinned).toEqual({ pool: "upstash", pin: "upstash" })
+    expect(pinNote(pinned)).toBe("BOX_PROVIDER=upstash in the server's env pins this yard's new pool boxes to Upstash Box")
+    // After it: UPSTASH_BOX_API_KEY alone, and Settings decides.
+    expect(poolSource(env(""), keys("upstashBoxApiKey", "agent37ApiKey"), "agent37")).toEqual({ pool: "agent37", pin: null })
+    expect(poolSource(env(""), keys("upstashBoxApiKey", "agent37ApiKey"), "upstash")).toEqual({ pool: "upstash", pin: null })
+    expect(poolSource(env(""), keys("upstashBoxApiKey"), "agent37")).toEqual({ pool: "upstash", pin: null })
+    expect(poolSource(env("agent37", "agent37"), keys("upstashBoxApiKey"), "upstash")).toEqual({ pool: "local", pin: "agent37" })
+    expect(pinNote(poolSource(env("local", "local"), keys(), "upstash"))).toBe("BOX_PROVIDER=local in the server's env pins this yard's new pool boxes to folders on this machine")
+    expect(poolSource({ ...env(""), mock: true }, keys(), "upstash")).toEqual({ pool: "local", pin: null })
+
+    // Why a cloud can't be used: the pin when that's it, never "add its API key" when the key is there.
+    expect(cloudProblem(env("upstash"), keys("upstashBoxApiKey", "agent37ApiKey"), "agent37")).toBeNull()
+    expect(cloudProblem(env("upstash"), keys("upstashBoxApiKey"), "agent37")).toBe("Agent37 boxes aren't set up: add an Agent37 API key in Settings › Box providers › Agent37 boxes")
+    expect(cloudProblem(env("local", "local"), keys("agent37ApiKey"), "agent37")).toMatch(/^BOX_PROVIDER=local pins this yard's boxes to folders on this machine, so it can't make Agent37 boxes/)
+    expect(cloudProblem(env("agent37", "agent37"), keys("agent37ApiKey"), "upstash")).toBe("Upstash boxes aren't set up: add an Upstash Box API key in Settings › Box providers › Upstash boxes")
+  })
+
+  it("deploy-box no longer pins BOX_PROVIDER, and a redeploy rewrites the whole .env", () => {
+    const src = fs.readFileSync(path.join(import.meta.dirname, "../scripts/deploy-box.ts"), "utf8")
+    expect(src).not.toMatch(/`BOX_PROVIDER=/)
+    expect(src).toContain("box.files.write({ path: `${APP}/.env`, content: envFile(")
+    expect(src).toContain('"AGENT37_API_KEY"')
   })
 })
 

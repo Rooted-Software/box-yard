@@ -101,6 +101,7 @@ import { loginName, type LoginHarness } from "../shared/agentLogins.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
+import { cloudProblem, pinNote, poolSource } from "./boxPool.js"
 import { TurnMeter, type MeasuredTurn } from "./turnPeaks.js"
 import { turnTiming } from "./turnTimings.js"
 import { perfMark, perfSpan } from "./perfTrace.js"
@@ -2448,6 +2449,27 @@ export class TaskManager {
     }
   }
 
+  /** Whether a box cloud's key is set (env or Settings › Box providers), for poolSource and cloudProblem. */
+  private readonly hasKey = (k: "upstashBoxApiKey" | "agent37ApiKey") => Boolean(this.settings.credentials.get(k))
+
+  /**
+   * pool_status' global Box cloud: where new pool boxes really come from (server/boxPool.ts), with the BOX_PROVIDER pin
+   * when the env overrides Settings, so it never claims Settings' pick when that pick doesn't count.
+   */
+  private globalBoxCloudLine(picked: BoxPool): string {
+    const src = poolSource(this.c, this.hasKey, picked)
+    const head = `global: new pool boxes come from ${src.pool === "local" ? "folders on this machine" : BOX_POOL_LABEL[src.pool]}`
+    if (this.c.mock) return `${head} (mock mode)`
+    if (src.pin) {
+      const over = picked !== src.pin ? `, over Settings › Box providers' pick of ${BOX_POOL_LABEL[picked]}` : ""
+      // A cloud pin is only the default: tasks and projects set to the other cloud still get it once it has a key.
+      const other = src.pin === "local" ? null : BOX_POOLS.find((p) => p !== src.pin && this.hasKey(p === "agent37" ? "agent37ApiKey" : "upstashBoxApiKey"))
+      return `${head} (${pinNote(src)}${over})${other ? `; tasks and projects set to ${BOX_POOL_LABEL[other]} still get ${BOX_POOL_LABEL[other]} boxes` : ""}`
+    }
+    if (src.pool !== picked) return `${head} (Settings › Box providers picks ${BOX_POOL_LABEL[picked]}, which has no API key yet)`
+    return `${head} (Settings › Box providers)`
+  }
+
   /**
    * A project's box settings as they apply now (list_projects, pool_status): each one its own ("… (this project)")
    * or the global setting it falls back to. Tasks running at once and task folders kept per box follow each box's size unless Settings
@@ -2461,7 +2483,7 @@ export class TaskManager {
     const own = (v: number | string) => `${v} (this project)`
     const used = this.projectBoxCap(p.id)?.used.size ?? 0
     return {
-      boxCloud: p.boxCloud ? own(BOX_POOL_LABEL[p.boxCloud]) : `global: new pool boxes come from ${BOX_POOL_LABEL[s.boxPool]} (Settings › Box providers)`,
+      boxCloud: p.boxCloud ? own(BOX_POOL_LABEL[p.boxCloud]) : this.globalBoxCloudLine(s.boxPool),
       boxSize: p.boxSize ? own(p.boxSize) : this.autoSizeLine(p.id),
       agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its tasks at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Tasks running at once per box"),
       tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : (this.autoTasksPerBoxLine(p.id) ?? global("maxResidentPerBox", "Task folders kept per box")),
@@ -5753,7 +5775,8 @@ export class TaskManager {
       }
       // No box of the project's size has a free slot and the pool (or the project) can't grow.
       if (cloud && !cloudReady && !candidates.length) {
-        this.setWaitReason(taskId, `Waiting for an ${BOX_POOL_LABEL[cloud]} box: ${BOX_POOL_LABEL[cloud]} boxes aren't set up here (add its API key in Settings › Box providers), and this task runs only on ${BOX_POOL_LABEL[cloud]}`)
+        const why = cloudProblem(this.c, this.hasKey, cloud) ?? `${BOX_POOL_LABEL[cloud]} boxes aren't available on this yard's box provider`
+        this.setWaitReason(taskId, `Waiting for an ${BOX_POOL_LABEL[cloud]} box: ${why}, and this task runs only on ${BOX_POOL_LABEL[cloud]}`)
         return null
       }
       if (inherited && !cloud && this.provider.name !== inherited && !candidates.length) {

@@ -77,7 +77,7 @@ export class UpstashProvider implements BoxProvider {
     return this.cache
   }
 
-  /** On its own (BOX_PROVIDER), it makes one kind of pool box. */
+  /** On its own (scripts: makeProvider without credentials), it makes one kind of pool box. */
   pools(): BoxPool[] {
     return ["upstash"]
   }

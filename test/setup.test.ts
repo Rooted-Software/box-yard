@@ -106,7 +106,7 @@ describe("GET /api/setup", () => {
     expect((await json<SetupStatus>("GET", "/api/setup")).body.missing).toEqual(["Claude sign-in"])
     const saved = await json<SetupStatus>("PUT", "/api/setup/credentials", { upstashBoxApiKey: BOX_KEY, anthropicApiKey: API_KEY })
     expect(saved.body.ready).toBe(true)
-    expect(saved.body.boxes).toEqual({ provider: "local", required: false })
+    expect(saved.body.boxes).toEqual({ provider: "local", required: false, pin: "BOX_PROVIDER=local in the server's env pins this yard's new pool boxes to folders on this machine" })
     expect(saved.body.restart).toEqual([expect.stringContaining("BOX_PROVIDER=local")])
   })
 })
@@ -348,6 +348,34 @@ describe("POST /api/setup/test/:key", () => {
     expect(body.agent37).toEqual({ active: true, keySet: true })
     expect(body.upstash.available).toBe(true)
     expect(body.missing).not.toContain("Agent37 API key")
+    expect(await yard!.setup.runnerProblem("box", true)).toBeNull()
+  })
+
+  it("BOX_PROVIDER=upstash (a deploy-box yard) shows its pin and still lets Agent37 tasks run once Agent37 has a key", async () => {
+    const { json } = await boot(firstRun({ port: await freePort(), provider: "upstash", boxProvider: "upstash" }))
+    yard!.settings.update({ boxPool: "agent37" })
+    const project = (await json<{ id: string }>("POST", "/api/projects", { name: "pinned" })).body
+    const line = () => yard!.tasks.projectBoxSettings({ ...yard!.store.getProject(project.id)!, boxCloud: null }).boxCloud
+    expect((await json("PUT", "/api/setup/credentials", { upstashBoxApiKey: "up_secret_upstash_key_0123456789" })).status).toBe(200)
+    expect(await yard!.setup.runnerProblem("box", true, "claude", undefined, "agent37")).toMatch(/^Agent37 boxes aren't set up: add an Agent37 API key/)
+    expect(line()).toBe("global: new pool boxes come from Upstash Box (BOX_PROVIDER=upstash in the server's env pins this yard's new pool boxes to Upstash Box, over Settings › Box providers' pick of Agent37)")
+    expect((await json("PUT", "/api/setup/credentials", { agent37ApiKey: "sk_live_secret_agent37_key_0123456789" })).status).toBe(200)
+    const { body } = await json<SetupStatus>("GET", "/api/setup")
+    // Settings says the env decides, not its own pick; Agent37 isn't the default, but it can be asked for.
+    expect(body.boxes.pin).toBe("BOX_PROVIDER=upstash in the server's env pins this yard's new pool boxes to Upstash Box")
+    expect(body.agent37).toEqual({ active: false, keySet: true })
+    expect(yard!.tasks.provider.pools?.()).toEqual(["upstash", "agent37"])
+    expect(await yard!.setup.runnerProblem("box", true, "claude", undefined, "agent37")).toBeNull()
+    expect(line()).toBe("global: new pool boxes come from Upstash Box (BOX_PROVIDER=upstash in the server's env pins this yard's new pool boxes to Upstash Box, over Settings › Box providers' pick of Agent37); tasks and projects set to Agent37 still get Agent37 boxes")
+  })
+
+  it("BOX_PROVIDER=local names the pin as what keeps Agent37 out, never a missing key", async () => {
+    const { json } = await boot(firstRun({ port: await freePort(), provider: "local", boxProvider: "local" }))
+    expect((await json("PUT", "/api/setup/credentials", { agent37ApiKey: "sk_live_secret_agent37_key_0123456789" })).status).toBe(200)
+    const { body } = await json<SetupStatus>("GET", "/api/setup")
+    expect(body.boxes.pin).toBe("BOX_PROVIDER=local in the server's env pins this yard's new pool boxes to folders on this machine")
+    expect(await yard!.setup.runnerProblem("box", true, "claude", undefined, "agent37")).toMatch(/^BOX_PROVIDER=local pins this yard's boxes to folders on this machine, so it can't make Agent37 boxes/)
+    // Plain "box" is still this machine's folders, as before.
     expect(await yard!.setup.runnerProblem("box", true)).toBeNull()
   })
 
