@@ -969,7 +969,7 @@ export function createBoxYard(
       timezone: { value: c.defaultTimezone, envVar: "BOXYARD_TIMEZONE" },
       maxUploadMb: { value: c.maxUploadMb, envVar: "BOXYARD_MAX_UPLOAD_MB" },
       scheduler: { value: scheduler.mode, envVar: "QSTASH_TOKEN", note: "qstash when QSTASH_TOKEN is set, else local" },
-      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else the boxPool setting (upstash or agent37) once that cloud has a key in Settings › Box providers" },
+      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER=local keeps boxes on this machine; BOX_PROVIDER=upstash or agent37 pins the default cloud, but tasks and projects set to the other cloud still get it once it has a key; else the boxPool setting (upstash or agent37) once that cloud has a key in Settings › Box providers" },
       localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
     }),
     save: { settings: saveSettings, runpod: saveRunpodSettings, vast: saveVastSettings, daytona: saveDaytonaSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },

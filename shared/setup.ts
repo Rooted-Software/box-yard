@@ -35,7 +35,7 @@ export interface SetupStatus {
      * "BOX_PROVIDER=upstash in the server's env pins this yard's new pool boxes to Upstash Box": the env overrides
      * Settings › Box providers' pick. Absent when Settings decides.
      */
-    pin?: string | null
+    pin?: string
   }
   claude: {
     required: boolean

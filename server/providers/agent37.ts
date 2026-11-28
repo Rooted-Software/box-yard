@@ -95,7 +95,7 @@ export class Agent37Provider implements BoxProvider {
     return this.creds.get("agent37ApiKey")
   }
 
-  /** On its own (BOX_PROVIDER), it makes one kind of pool box. */
+  /** On its own (scripts: makeProvider without credentials), it makes one kind of pool box. */
   pools(): BoxPool[] {
     return ["agent37"]
   }
