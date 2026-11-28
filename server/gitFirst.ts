@@ -50,13 +50,15 @@ const EMPTY_PACK_BYTES = 32
 
 /**
  * Bash: pick the stage's base folder, the one of /tmp and `<root>/.boxyard/tmp` with more free space, so a nearly
- * full root disk (Upstash's / holds /tmp and HOME) doesn't stop an archive. Sets $bybase.
+ * full root disk (Upstash's / holds /tmp and HOME) doesn't stop an archive. A tmpfs /tmp is memory, so it's never
+ * picked then. Sets $bybase.
  */
 export function stageBaseScript(root: string): string {
   const alt = q(`${root}/.boxyard/tmp`)
   return [
     `byfree() { df -Pk "$1" 2>/dev/null | awk 'NR > 1 { print $4 }' | tail -n 1; }`,
-    `bybase=/tmp; byft=$(byfree /tmp)`,
+    // A tmpfs /tmp is memory (Agent37's reports far more free space than its RAM): never stage there.
+    `bybase=/tmp; byft=$(byfree /tmp); [ "$(stat -f -c %T /tmp 2>/dev/null)" = tmpfs ] && byft=0`,
     `if mkdir -p ${alt} 2>/dev/null; then byfa=$(byfree ${alt}); [ "\${byfa:-0}" -gt "\${byft:-0}" ] && bybase=${alt}; fi`,
   ].join("\n")
 }

@@ -12,8 +12,12 @@ import { q, type BoxHealth, type BoxProvider, type BoxSnapshotInfo, type BoxUsag
  * whole disk persists anyway (installed tools, /root), but workspaces are what matter if an instance is restored.
  */
 export const AGENT37_ROOT = "/home/node/boxyard"
-/** Where execStream keeps a running command's output until it has been read off. */
-const JOBS = "/tmp/boxyard-jobs"
+/**
+ * Where execStream keeps a running command's output until it has been read off: on the disk, in the folder Box Yard's
+ * stale-temp sweep watches. Not /tmp: on Agent37 that's a tmpfs, so an archive staged there would take the box's RAM
+ * (and a restart empties it).
+ */
+const JOBS = ".boxyard/tmp/streams"
 /**
  * One argument to `sh -c` can't be over 128 KB (Linux's MAX_ARG_STRLEN), and the body of one exec at most 1 MB: a file
  * goes up in pieces of this many bytes, 88 KB once base64'd. Agent37's own reference client uses 48 KB.
@@ -22,7 +26,7 @@ const WRITE_CHUNK = 64 * 1024
 /** Exec's stdout is capped at 512 KB: a read takes this much at a time, 480 KB once base64'd. */
 const READ_CHUNK = 360 * 1024
 /** Pieces in flight at once. Agent37 runs up to 48 commands per instance; a turn's own commands need room too. */
-const PARALLEL = 6
+const PARALLEL = 12
 /** A command longer than this goes up as a script file first, so the one `sh -c` argument stays under 128 KB. */
 const INLINE_COMMAND_MAX = 96 * 1024
 /** Signed preview URLs last a day and are signed again an hour before they lapse (they can't be revoked). */
@@ -285,7 +289,7 @@ export class Agent37Provider implements BoxProvider {
    * Agent37 can't be reached; the command may still be running then.
    */
   async execStream(boxId: string, command: string, onOutput: (chunk: string) => void): Promise<{ exitCode: number }> {
-    const dir = `${JOBS}/${randomUUID()}`
+    const dir = `${this.rootDir}/${JOBS}/${randomUUID()}`
     const { command: cmd, cleanup } = await this.bash(boxId, command)
     await this.api.execBackground(instanceId(boxId), {
       command: `mkdir -p ${q(dir)} && (${cmd} > ${q(`${dir}/out`)} 2>&1; echo $? > ${q(`${dir}/code.tmp`)}; mv ${q(`${dir}/code.tmp`)} ${q(`${dir}/code`)}${cleanup ? `; rm -f ${q(cleanup)}` : ""})`,
@@ -334,7 +338,7 @@ export class Agent37Provider implements BoxProvider {
       const started = await this.api.execBackground(instanceId(boxId), { command: `${cmd} > /dev/null 2>&1${cleanup ? `; rm -f ${q(cleanup)}` : ""}`, name: `by-${randomUUID()}` })
       pid = started.pid
       while (!signal.aborted) {
-        await abortableSleep(this.o.holdPollMs ?? 30_000, signal)
+        await abortableSleep(this.o.holdPollMs ?? 10_000, signal)
         if (signal.aborted) break
         const res = await this.run(boxId, `kill -0 ${pid} 2>/dev/null && echo alive || echo ended`)
         if (res.stdout.trim() !== "alive") return

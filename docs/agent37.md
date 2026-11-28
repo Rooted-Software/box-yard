@@ -50,11 +50,12 @@ This isn't supported yet. The pool's cloud is one choice for the whole yard, bec
   Then the same setup as an Upstash box runs: Claude Code at the version Box Yard needs, and git's credential helper. Workspaces live in `/home/node/boxyard`, on the disk Agent37 backs up nightly.
 - **Commands** go through Agent37's exec API on `sandbox.agent37.app` with the key, as root, through `bash -c`. Each one has a `name`, so a resend after a dropped connection or a 504 rejoins the same run instead of starting it twice. A command over 96 KB goes up as a script file first, because one shell argument can't pass 128 KB. Exec keeps 512 KB of each stream; when output is cut, the result's stderr says so.
 - **Files.** The plain template has no file API, so files move through exec, the way Agent37's own LangChain client does it:
-  - uploads go in 64 KB base64 pieces, six at a time, written at their offsets into a file next to the target, then moved into place once the size checks out;
+  - uploads go in 64 KB base64 pieces, twelve at a time, written at their offsets into a file next to the target, then moved into place once the size checks out;
   - reads come back in 360 KB pieces.
 
   A failed upload leaves nothing behind.
-- **Streaming.** Exec doesn't stream. A streamed command (workspace archives) runs in the background into `/tmp/boxyard-jobs/<id>/out`, with stdout and stderr merged as on Upstash. Its output is read off as it grows, then the file is removed. A turn's hold runs in the background too, and Box Yard checks on it every 30 seconds. Each check is an exec, which keeps the box awake under a running turn.
+- **Streaming.** Exec doesn't stream. A streamed command (workspace archives) runs in the background into `<root>/.boxyard/tmp/streams/<id>/out` on the disk, with stdout and stderr merged as on Upstash. Its output is read off as it grows, then the file is removed. A turn's hold runs in the background too, and Box Yard checks on it every 10 seconds. Each check is an exec, which keeps the box awake under a running turn.
+- **Disk and `/tmp`.** The whole disk survives a stop and start (`/root`, `/usr/local`, `/etc`, npm's global installs, git config). `/tmp` is a tmpfs, so it's memory and is emptied by every restart.
 - **Sleep and wake.** An idle box sleeps after `AGENT37_IDLE_SLEEP_SECONDS` and bills its disk alone. Box Yard sees it as paused. Any exec wakes it, and so does opening a preview; a stopped box is started.
 - **Previews.** Each port gets a signed URL that opens only that port. It lapses after a day, and Box Yard signs a new one an hour before then. Agent37 can't revoke a signed URL early, so anyone with the link can open that port until it lapses. Opening it wakes a sleeping box.
 - **Snapshots.** Agent37 has no disk snapshots for new instances to start from, so Box Yard uses forks instead:
@@ -63,7 +64,7 @@ This isn't supported yet. The pool's cloud is one choice for the whole yard, bec
   - deleting the snapshot deletes the fork, and Box Yard refuses to delete any instance that isn't one of its snapshots.
 - **Resize.** The provider can resize an instance in place (cpu and memory either way, disk only up), but the yard resizes by migration, as on Upstash. That's because one yard can hold boxes on both clouds.
 - **Leftovers and reconcile.** The orphan sweep looks for this install's label on every cloud with a key, so a switch leaves nothing behind. Snapshot forks are never swept. Reconcile lists the workspace's instances to notice a box deleted in Agent37's dashboard.
-- **Auto-sizing** doesn't measure Agent37 boxes yet. It reads a box's own cgroup counters, and Box Yard hasn't checked that a gVisor instance exposes them, so the provider doesn't claim its own cgroup. A project's own Box size, or Settings' size, applies instead.
+- **Auto-sizing** doesn't measure Agent37 boxes yet. Each instance has its own cgroup, but it's cgroup v1 and Box Yard's probe reads v2 files, so the provider doesn't claim its own cgroup. A project's own Box size, or Settings' size, applies instead.
 - **Cost.** Agent37 bills a running instance by the minute, whatever its CPU does. Box Yard's compute figure for a box is Agent37's own charge from `GET /v1/usage`, per instance. Agent37 settles that hourly, so it can be up to an hour behind. Box Yard doesn't price Agent37 boxes by CPU time at Upstash's rates. Disk is still metered at Settings › Usage's storage rate on top, which counts disk Agent37 already bills; that's cents a month per box.
 
 ## Safety
@@ -72,20 +73,33 @@ This isn't supported yet. The pool's cloud is one choice for the whole yard, bec
 - The key stays on the server. It goes only to `api.agent37.com` (as `Authorization: Bearer`) and `sandbox.agent37.app` (as `X-Agent37-Key`), never into an instance's env, a command, a URL or an error message. The UI field is a `SecretInput`, and the settings API reports only whether a key is set. Local agents run as the server's OS user, so this isn't isolation from them.
 - An Agent37 key controls every instance in its workspace. Use a workspace of its own for Box Yard if other things run there.
 
-## Not yet checked against Agent37
+## Checked against Agent37
 
-The tests use a fake Agent37 (`test/agent37.test.ts`). These things come from Agent37's docs and haven't been checked with a real key:
+`npm run smoke:agent37` (`scripts/smoke-agent37.ts`) runs the provider against the real API with `AGENT37_API_KEY`. It makes one small box, plus a snapshot fork and a box from it, and deletes all three at the end, also when a check fails. It only touches instances it made, so it's safe on a workspace that runs other things. It costs about a cent and takes five minutes; `--keep` leaves the box up, `--no-snapshot` skips the forks. Run on 2026-11-28, all 19 checks passed:
 
-- that `agent37-base` has `bash`, GNU `coreutils` (`base64`, `dd`, `tail -c`) and npm's global install works as root, so Claude Code installs;
-- that exec as `root` gets a usable `HOME` and the instance's env (`IS_SANDBOX=1`, which Claude Code needs to run with `--dangerously-skip-permissions` as root);
-- that a background exec outlives its call and its process group can be killed with `kill -- -<pid>`;
-- that six execs at once from one box are fine, given Agent37's 48 at once per instance;
-- that a fork of a stopped fork starts and keeps the files, and how long a fork of a full disk takes;
-- that `GET /v1/usage` lists instances by the bare id with `compute_micros`;
-- that a 30-second exec poll counts as activity, so a box doesn't sleep under a running turn;
-- that a signed preview URL opens a dev server's page and its WebSocket in a browser tab;
-- whether `/sys/fs/cgroup` in an instance is the instance's own, so auto-sizing could measure Agent37 boxes too;
-- how long a create takes, and what Box Yard's create timeout should be.
+- **Create and setup:** about 6 s for a small box, Box Yard's worker setup included. `agent37-base` already has Claude Code (2.1.332), Node 24, git 2.39, bash 5.2 and GNU coreutils 9.1.
+- **Exec as root:** `HOME` is `/home/node`, so git and Claude Code config land on the kept disk, and the instance env (`IS_SANDBOX=1`) reaches every command.
+- **Files:** 1 MB writes in about 1.7 s and reads in 0.9 s; a 5 MB upload takes about 4 s (10 Mbit/s). Pieces go twelve at a time.
+- **Streaming:** 1.5 MB comes off in five pieces with stderr merged and the exit code kept.
+- **Long and large commands:** a command over 128 KB runs from a script file, and a 130-second command is fine on one exec call.
+- **Background and hold:** a background process outlives its call. A hold returns within about 10 s of its command ending, and abort stops it.
+- **Previews:** a server on port 8080 answers through its signed URL (HTTP 200).
+- **Stop and wake:** a stopped box reads as paused, and `wake` starts it. The disk is kept, but `/tmp` is a tmpfs, emptied by every restart.
+- **Leftovers and reconcile:** the sweep finds the box by its label, and the box is in the live list.
+- **Snapshots:** a snapshot (stopped fork) takes about 25 s. A box made from it (about 35 s) has the files, and deleting the snapshot refuses a box.
+- **Usage:** `GET /v1/usage` lists instances by bare id with `compute_micros`. A new box isn't listed until its first hourly settle, so it reads $0 until then.
+
+What the live runs changed:
+
+- **Stream staging moved to the disk.** `/tmp` on Agent37 is a tmpfs that reports far more free space (63 GB) than the box has RAM. Box Yard's archive staging picks the place with more room, so it would have staged in memory. Streamed output now goes to `<root>/.boxyard/tmp/streams`, and staging never picks a tmpfs `/tmp`, on any provider.
+- **Hold polls every 10 s** rather than every 30 s, so a finished turn is noticed sooner.
+
+Still not checked live:
+
+- a full Claude Code turn on a box, with the yard's credentials;
+- an idle box falling asleep and an exec waking it (the restart above was an explicit stop);
+- a dev server's WebSocket through a signed URL in a browser tab;
+- auto-sizing. Each instance has its own cgroup, but it's cgroup v1 (`cpu`, `memory`, …), and Box Yard's probe reads v2 files (`cpu.stat`, `memory.current`), so Agent37 boxes aren't measured.
 
 ## Files
 
@@ -97,3 +111,4 @@ The tests use a fake Agent37 (`test/agent37.test.ts`). These things come from Ag
 | `shared/agent37.ts` | The pool choice, box ids and the shape for each size |
 | `web/src/components/Agent37Settings.tsx` | Settings › Box providers › Agent37 boxes |
 | `test/agent37.test.ts` | The provider against a fake Agent37 |
+| `scripts/smoke-agent37.ts` | `npm run smoke:agent37`: the provider against the real API |
