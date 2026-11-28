@@ -1603,7 +1603,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         task: z.string(),
         message: z.string().min(1),
         attachments: attachmentsSchema,
-        runs_on: runsOnBase.describe('Move it ("local", "this_computer", "box", "box:<size>", "daytona:<size>", "gpu", "gpu:<cloud>", "gpu:<cloud>:<gpu>", "docker", "ssh" or "label:<label>") from its next turn on; omit it to leave it where it runs (Task options)'),
+        runs_on: runsOnBase.describe('Move it ("local", "this_computer", "box", "box:<size>", "agent37" or "agent37:<size>" for Agent37, "upstash" or "upstash:<size>" for Upstash, "daytona:<size>", "gpu", "gpu:<cloud>", "gpu:<cloud>:<gpu>", "docker", "ssh" or "label:<label>") from its next turn on; omit it to leave it where it runs (Task options)'),
         machine_label: machineLabelBase.describe("Move it to a free SSH machine with this label or name from its next turn on (Task options)"),
         steer: z.boolean().optional().describe(STEER_DESCRIPTION),
         interrupt: z.boolean().optional().describe(INTERRUPT_DESCRIPTION),

@@ -893,6 +893,8 @@ interface TaskLookups {
   /** Its card line when it has no summary (shared/activity.ts). */
   activity(taskId: string): string | null
   runner(projectId: string): Runner
+  /** Its project's box cloud (Project.boxCloud), for its placement. */
+  boxCloud(projectId: string): BoxPool | null
   /** Its latest turn's model and effort (Task.turnModel); null before its first turn. */
   lastTurn(taskId: string): LastTurn | null
 }
@@ -1606,6 +1608,7 @@ export class Store {
     )
     let activity: ReturnType<DB["prepare"]> | undefined
     const runners = new Map<string, Runner>()
+    const clouds = new Map<string, BoxPool | null>()
     return {
       lastTurn: (id) => lastTurn.get(id) ?? null,
       pending: (id) => pending.get(id) ?? NO_PENDING,
@@ -1614,6 +1617,10 @@ export class Store {
       runner: (projectId) => {
         if (!runners.has(projectId)) runners.set(projectId, this.projectRunner(projectId))
         return runners.get(projectId)!
+      },
+      boxCloud: (projectId) => {
+        if (!clouds.has(projectId)) clouds.set(projectId, this.projectBoxCloud(projectId))
+        return clouds.get(projectId)!
       },
     }
   }
@@ -1670,7 +1677,7 @@ export class Store {
       boxCloud: boxPoolOf(row.box_cloud),
       machineLabel: row.machine_label || null,
       gpu: taskGpuPick(row),
-      placement: this.taskPlacement(row, lookups.runner(row.project_id)),
+      placement: this.taskPlacement(row, lookups.runner(row.project_id), lookups.boxCloud),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
       icon: isTaskIcon(row.icon) ? row.icon : null,
@@ -1732,7 +1739,7 @@ export class Store {
   }
 
   /** Where a task runs now, where it last ran, and where its next turn goes (shared/placement.ts). */
-  taskPlacement(row: TaskRow, projectRunner = this.projectRunner(row.project_id)): TaskPlacement {
+  taskPlacement(row: TaskRow, projectRunner = this.projectRunner(row.project_id), projectCloud: (projectId: string) => BoxPool | null = (id) => this.projectBoxCloud(id)): TaskPlacement {
     const own = taskRunsOn(row)
     return {
       now: row.box_id ? { ...this.placeOf(row.box_id), ...(isBoxPick(row.placed_how) ? { how: row.placed_how } : {}) } : null,
@@ -1741,16 +1748,13 @@ export class Store {
       chosenBy: own ? "task" : "project",
       projectRunner,
       ...((own ?? projectRunner) === "ssh" ? { machineLabel: this.taskMachineLabel(row) } : {}),
-      ...((own ?? projectRunner) === "box" ? this.boxCloudPlacement(row) : {}),
+      ...((own ?? projectRunner) === "box" ? boxCloudPlacement(row, projectCloud) : {}),
     }
   }
 
-  /** A pool-box task's own cloud ("agent37"), else its project's, for its placement chip; nothing when neither names one. */
-  private boxCloudPlacement(row: TaskRow): { boxCloud: BoxPool; cloudChosenBy: "task" | "project" } | Record<string, never> {
-    const own = boxPoolOf(row.box_cloud)
-    if (own) return { boxCloud: own, cloudChosenBy: "task" }
-    const project = boxPoolOf((this.db.prepare("SELECT box_cloud FROM projects WHERE id = ?").get(row.project_id) as { box_cloud?: string | null } | undefined)?.box_cloud)
-    return project ? { boxCloud: project, cloudChosenBy: "project" } : {}
+  /** A project's box cloud (Project.boxCloud). `SELECT *`, so a database from before the column reads null. */
+  projectBoxCloud(id: string): BoxPool | null {
+    return boxPoolOf((this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined)?.box_cloud)
   }
 
   /**
@@ -4905,6 +4909,14 @@ function timingFromRow(r: TurnTimingRow): TurnTiming {
     loginId: r.login_id ?? null,
     steps: parse(r.steps_json, []),
   } as TurnTiming
+}
+
+/** A pool-box task's own cloud ("agent37"), else its project's, for its placement chip; nothing when neither names one. */
+function boxCloudPlacement(row: TaskRow, projectCloud: (projectId: string) => BoxPool | null): { boxCloud: BoxPool; cloudChosenBy: "task" | "project" } | Record<string, never> {
+  const own = boxPoolOf(row.box_cloud)
+  if (own) return { boxCloud: own, cloudChosenBy: "task" }
+  const project = projectCloud(row.project_id)
+  return project ? { boxCloud: project, cloudChosenBy: "project" } : {}
 }
 
 /** A stored cloud ('upstash' or 'agent37'), or null for anything else. */
