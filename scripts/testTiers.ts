@@ -25,6 +25,7 @@ export const SLOW_TESTS: Record<string, string> = {
   "test/box-clear-delete.e2e.test.ts": "End-to-end runner/server integration",
   "test/box-cpu-meter.e2e.test.ts": "End-to-end runner/server integration",
   "test/box-delete.test.ts": "Real Git repositories/configuration or archive/bundle operations",
+  "test/box-cloud.e2e.test.ts": "End-to-end runner/server integration",
   "test/box-history.e2e.test.ts": "End-to-end runner/server integration",
   "test/box-limits-reset.e2e.test.ts": "End-to-end runner/server integration",
   "test/box-provisioning.test.ts": "Full Box Yard server/task-manager fixture",
