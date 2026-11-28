@@ -3,7 +3,7 @@
 import type { SettingSource } from "./types.js"
 import type { DefaultProvider, Runner, SetupRunner } from "./runner.js"
 
-export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "cursorApiKey", "opencodeAuthJson", "githubToken", "runpodApiKey", "vastApiKey", "daytonaApiKey"] as const
+export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "cursorApiKey", "opencodeAuthJson", "githubToken", "runpodApiKey", "vastApiKey", "daytonaApiKey", "agent37ApiKey"] as const
 export type CredentialKey = (typeof CREDENTIAL_KEYS)[number]
 
 /**
@@ -72,8 +72,13 @@ export interface SetupStatus {
     /** What this install started with: "local" (this computer) on a fresh install unless BOXYARD_DEFAULT_RUNNER says otherwise; null on older installs. */
     installDefault?: SetupRunner | null
   }
-  /** Projects can pick "Upstash box": an Upstash key is set (or boxes are local folders: mock, BOX_PROVIDER=local). */
+  /**
+   * Projects can pick "Upstash box" (a pool box): the pool's cloud has a key (Upstash's, or Agent37's when the pool is
+   * Agent37), or boxes are local folders (mock, BOX_PROVIDER=local).
+   */
   upstash: { available: boolean }
+  /** Agent37 as the pool's cloud (docs/agent37.md): `active` when new pool boxes come from it, `keySet` when its key is there. */
+  agent37: { active: boolean; keySet: boolean }
   /** What this computer has for local agents. Null until "This computer" is chosen. */
   local: LocalCheck | null
   /** What a saved value can't change until the server restarts, in plain words. Empty when everything is live. */
@@ -273,6 +278,13 @@ export const CREDENTIAL_INFO: Record<
     placeholder: "dtn_…",
     help: "Optional: lets projects run on Daytona GPU or CPU sandboxes (Settings › Daytona).",
     link: { href: "https://app.daytona.io/dashboard/keys", label: "Create one in Daytona's API Keys page" },
+  },
+  agent37ApiKey: {
+    label: "Agent37 API key",
+    env: "AGENT37_API_KEY",
+    placeholder: "sk_live_…",
+    help: "Optional: lets pool boxes run on Agent37 instances instead of Upstash (Settings › Box providers › Agent37 boxes).",
+    link: { href: "https://www.agent37.com/dashboard/cloud/api-keys", label: "Create one in Agent37's API keys page" },
   },
 }
 

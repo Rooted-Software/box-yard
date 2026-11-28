@@ -47,7 +47,8 @@ export function RunnerSettings({ fid, onSection, dirtySections, active, settings
     if (!s) return null
     switch (section) {
       case "local": return localStatus(s)
-      case "upstash": return s.upstash.available ? "Configured" : "API key missing"
+      case "upstash": return s.agent37?.active ? (s.credentials.upstashBoxApiKey.state === "set" ? "Key configured · new boxes come from Agent37" : "API key missing") : s.upstash.available ? "Configured" : "API key missing"
+      case "agent37": return s.agent37?.keySet ? (s.agent37.active ? "New pool boxes come from here" : "Key configured") : "API key missing"
       case "runpod": return keyStatus("runpodApiKey")
       case "vast": return keyStatus("vastApiKey")
       case "daytona": return keyStatus("daytonaApiKey")

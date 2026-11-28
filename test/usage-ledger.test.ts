@@ -219,6 +219,7 @@ describe("compute cost estimate", () => {
 
   it("knows where a box ran from its id and provider", () => {
     expect(computeProvider("pure-lobster", "upstash")).toBe("upstash")
+    expect(computeProvider("agent37-ab12cd34ef", "agent37")).toBe("agent37")
     expect(computeProvider("runpod-prj_a-2", "runpod")).toBe("runpod")
     expect(computeProvider("vastai-prj_a", "vast")).toBe("vast")
     expect(computeProvider("docker-prj_a", "docker")).toBe("docker")

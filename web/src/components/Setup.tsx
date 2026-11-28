@@ -669,6 +669,8 @@ export function SetupCard({ status, className }: { status: SetupStatus; classNam
   const id = useId()
   const owner = useAgentSettings().data?.sources.ownerName
   const set = (k: CredentialKey) => status.credentials[k].state === "set"
+  // Pool boxes need their cloud's key: Upstash's, or Agent37's when Settings › Box providers › Agent37 boxes picks it.
+  const poolKey: CredentialKey = status.agent37?.active ? "agent37ApiKey" : "upstashBoxApiKey"
   const choice = status.runner.choice
   const local = choice === "local"
   const localReady = Boolean(status.local?.tools.every((t) => t.found || !LOCAL_TOOL_INFO[t.key].required))
@@ -720,8 +722,8 @@ export function SetupCard({ status, className }: { status: SetupStatus; classNam
           </Step>
         )}
         {choice === "box" && status.boxes.required && (
-          <Step n={++n} done={set("upstashBoxApiKey")} title={CREDENTIAL_INFO.upstashBoxApiKey.label} help={<CredentialHelp k="upstashBoxApiKey" />}>
-            <CredentialField k="upstashBoxApiKey" status={status.credentials.upstashBoxApiKey} id={`${id}-box`} />
+          <Step n={++n} done={set(poolKey)} title={CREDENTIAL_INFO[poolKey].label} help={<CredentialHelp k={poolKey} />}>
+            <CredentialField k={poolKey} status={status.credentials[poolKey]} id={`${id}-box`} />
           </Step>
         )}
         <Step

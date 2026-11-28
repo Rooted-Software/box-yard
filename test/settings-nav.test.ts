@@ -50,7 +50,7 @@ describe("settings nav", () => {
     expect(SETTINGS_TOP_SECTIONS.filter((s) => s.key === "runners")).toHaveLength(1)
     expect(SETTINGS_TOP_SECTIONS.some((s) => ["docker", "runpod", "vast", "daytona", "machines", "local", "upstash"].includes(s.key))).toBe(false)
     // Daytona is a provider of its own (CPU only or with a GPU), not only a GPU cloud.
-    expect(RUNNER_SECTIONS.map((s) => s.key)).toEqual(["local", "upstash", "docker", "daytona", "machines", "runpod", "vast"])
+    expect(RUNNER_SECTIONS.map((s) => s.key)).toEqual(["local", "upstash", "agent37", "docker", "daytona", "machines", "runpod", "vast"])
     for (const s of RUNNER_SECTIONS) {
       expect(parseSection(s.key)).toBe(s.key)
       expect(settingsRoot(s.key)).toBe("runners")

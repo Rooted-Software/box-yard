@@ -9,6 +9,7 @@
 //   event names its $/hr, and it bills until its "deleted" or "lost" event. Each stretch is split between the task
 //   turns that ran on that box then (task_turns.box_id), equally between turns that overlap; time no turn ran is the
 //   box's idle time. Docker, this computer and SSH machines are Cody's own hardware, so they cost $0.
+import { isAgent37Box } from "../shared/agent37.js"
 import type { ComputeProvider, UsageComputeRow, UsageLedger, UsageLlmRow, UsageRole } from "../shared/usageLedger.js"
 import { gpuBoxProvider, anyGpuBoxProject } from "../shared/gpu.js"
 import { isDockerBox, dockerBoxProject } from "../shared/docker.js"
@@ -119,6 +120,7 @@ export function computeProvider(boxId: string, provider: string): ComputeProvide
   if (isDockerBox(boxId) || provider === "docker") return "docker"
   if (isMachineBox(boxId) || provider === "ssh") return "ssh"
   if (provider === "upstash") return "upstash"
+  if (isAgent37Box(boxId) || provider === "agent37") return "agent37"
   return "local"
 }
 

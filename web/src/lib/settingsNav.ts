@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "projects" | "agents" | "runners" | "local" | "upstash" | "credentials" | "identities" | "connectors" | "runpod" | "vast" | "daytona" | "docker" | "machines" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "appearance" | "about"
+export type SettingsSection = "orchestrator" | "projects" | "agents" | "runners" | "local" | "upstash" | "agent37" | "credentials" | "identities" | "connectors" | "runpod" | "vast" | "daytona" | "docker" | "machines" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "appearance" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -74,6 +74,13 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     parent: "runners",
     description: "Isolated cloud boxes: the key, box size, resizing, and tasks per box.",
     fields: ["workerSize", "autoResizeEnabled", "autoResizeMaxSize", "placementResizeEnabled", "slotsPerBox", "maxResidentPerBox"],
+  },
+  {
+    key: "agent37",
+    label: "Agent37 boxes",
+    parent: "runners",
+    description: "Pool boxes on Agent37 instances instead of Upstash: the key, and which cloud new boxes come from.",
+    fields: ["boxPool"],
   },
   {
     key: "credentials",
@@ -208,7 +215,7 @@ export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
 /** Other words for a section, in `?settings=` links and the command palette. */
-export const ALIASES: Record<string, SettingsSection> = { theme: "appearance", display: "appearance", runner: "runners", where: "runners", providers: "runners", identity: "identities", accounts: "identities", connector: "connectors", mcp: "connectors", oauth: "connectors", integrations: "connectors", gmail: "connectors", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", spend: "costs", meter: "costs", speech: "voice", tts: "voice", gpu: "runners", gpus: "runners", default: "runners", vastai: "vast", "vast.ai": "vast", sandbox: "daytona", sandboxes: "daytona", container: "docker", containers: "docker" }
+export const ALIASES: Record<string, SettingsSection> = { theme: "appearance", display: "appearance", runner: "runners", where: "runners", providers: "runners", identity: "identities", accounts: "identities", connector: "connectors", mcp: "connectors", oauth: "connectors", integrations: "connectors", gmail: "connectors", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", spend: "costs", meter: "costs", speech: "voice", tts: "voice", gpu: "runners", gpus: "runners", default: "runners", vastai: "vast", "vast.ai": "vast", sandbox: "daytona", sandboxes: "daytona", a37: "agent37", container: "docker", containers: "docker" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

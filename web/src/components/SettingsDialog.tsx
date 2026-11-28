@@ -31,6 +31,7 @@ import { ConnectorsPanel } from "./Connectors"
 import { RunPodPanel } from "./RunPodSettings"
 import { VastPanel } from "./VastSettings"
 import { DaytonaPanel } from "./DaytonaSettings"
+import { Agent37Panel } from "./Agent37Settings"
 import { DockerPanel } from "./DockerSettings"
 import { MachinesPanel } from "./MachineSettings"
 import { useOpenUsage } from "./UsageHost"
@@ -77,7 +78,7 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, projects: FolderGit2, agents: Bot, runners: Server, local: Laptop, upstash: Cloud, credentials: KeyRound, identities: Fingerprint, connectors: Plug, runpod: Cpu, vast: Cpu, daytona: Cpu, docker: Container, machines: Server, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, appearance: Palette, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, projects: FolderGit2, agents: Bot, runners: Server, local: Laptop, upstash: Cloud, agent37: Cloud, credentials: KeyRound, identities: Fingerprint, connectors: Plug, runpod: Cpu, vast: Cpu, daytona: Cpu, docker: Container, machines: Server, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, appearance: Palette, about: Info }
 const TOP_TABS: SettingsTab<SettingsSection>[] = SETTINGS_TOP_SECTIONS.map((s) => ({ key: s.key, label: s.label, icon: SECTION_ICON[s.key] }))
 /** Categories with nothing to save: a list, or facts. With no change pending anywhere, their footer is just Close. */
 const NO_DRAFT_SECTIONS: SettingsSection[] = ["projects", "about"]
@@ -670,6 +671,8 @@ export function SettingsDialog({
                     <Loading label="Loading box sizes" />
                   )}
                 </UpstashPanel>
+              ) : category === "agent37" ? (
+                <Agent37Panel fid={fid} settings={s ? { s, set, row } : null} />
               ) : category === "credentials" ? (
                 <CredentialsPanel fid={fid} />
               ) : category === "identities" ? (

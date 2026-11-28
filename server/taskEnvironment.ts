@@ -6,10 +6,10 @@ import { providerOf, type BoxProvider } from "./providers/types.js"
 
 // Physical providers, not the UI's broad "gpu"/"box" runner categories. In particular AutoProvider's local
 // folders are local, never Upstash. SSH is one type; this policy does not introduce per-machine isolation.
-export const ENVIRONMENT_TYPES = ["upstash", "docker", "local", "ssh", "runpod", "vast", "daytona"] as const
+export const ENVIRONMENT_TYPES = ["upstash", "agent37", "docker", "local", "ssh", "runpod", "vast", "daytona"] as const
 export type EnvironmentType = typeof ENVIRONMENT_TYPES[number]
 const environmentType = (value: unknown): EnvironmentType | null => ENVIRONMENT_TYPES.includes(value as EnvironmentType) ? value as EnvironmentType : null
-export const environmentRunner = (type: EnvironmentType): Runner => type === "upstash" ? "box" : type === "runpod" || type === "vast" || type === "daytona" ? "gpu" : type
+export const environmentRunner = (type: EnvironmentType): Runner => type === "upstash" || type === "agent37" ? "box" : type === "runpod" || type === "vast" || type === "daytona" ? "gpu" : type
 export const environmentGpu = (type: EnvironmentType): GpuProvider | null => environmentRunner(type) === "gpu" ? type as GpuProvider : null
 export const subtaskProviderProblem = (type: EnvironmentType): string | null => type === "runpod" || type === "vast"
   ? `Subtasks are not supported on ${type === "runpod" ? "RunPod" : "Vast.ai"} GPU boxes.`
@@ -63,7 +63,7 @@ export class TaskEnvironment {
       // Generic pool ids can be routed differently after provider configuration changes. Retain the server's
       // provider record as corroboration; if it has been deleted, do not guess from a name or today's default.
       const box = this.store.getBox(first.box_id)
-      if (!box && !/^(this-computer$|docker-|ssh-|runpod-|vastai-|daytona-)/.test(first.box_id)) this.reject("the original provider record is unavailable; lineage cannot be determined.")
+      if (!box && !/^(this-computer$|docker-|ssh-|runpod-|vastai-|daytona-|agent37-)/.test(first.box_id)) this.reject("the original provider record is unavailable; lineage cannot be determined.")
       return this.remember(row, this.physical(first.box_id))
     }
     if (row.session_started || row.turn_count) this.reject("the original turn history is unavailable; lineage cannot be determined.")
@@ -109,9 +109,9 @@ export class TaskEnvironment {
   }
 
   runner(type: EnvironmentType, runner: Runner, gpu: GpuProvider): void {
-    // A box selection may reuse an existing Upstash box even if AutoProvider currently creates local folders.
+    // A box selection may reuse an existing Upstash or Agent37 box even if AutoProvider currently creates elsewhere.
     // Pool growth and every actual destination are checked separately.
-    const target = runner === "box" ? (type === "upstash" ? "upstash" : environmentType(this.provider.name)) : runner === "gpu" ? gpu : runner
+    const target = runner === "box" ? (type === "upstash" || type === "agent37" ? type : environmentType(this.provider.name)) : runner === "gpu" ? gpu : runner
     if (target !== type) this.reject(`descendants of ${type} tasks must remain in ${type}; requested ${target ?? "unknown"} placement is forbidden.`)
   }
 

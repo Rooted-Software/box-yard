@@ -35,7 +35,9 @@ import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
 import { LocalProvider, LocalRunnerProvider, LocalRunnerRouter } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
-import { AutoProvider } from "./providers/auto.js"
+import { AutoProvider, type ActivePool } from "./providers/auto.js"
+import { Agent37Provider } from "./providers/agent37.js"
+import type { BoxPool } from "../shared/agent37.js"
 import type { BoxProvider } from "./providers/types.js"
 import { redact, type CredentialStore } from "./credentials.js"
 import { Setup, claudeLoginCheck, codexLoginCheck, type SetupDeps } from "./setup.js"
@@ -378,15 +380,28 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
 }
 
 /**
- * BOX_PROVIDER, or UPSTASH_BOX_API_KEY in the env, fixes where boxes are made, as before. With neither (a first run),
- * boxes are folders on this machine until an Upstash key is saved in Settings › Box providers › Upstash boxes, then Upstash boxes,
- * with no restart. Without `credentials` (scripts), only the env counts.
+ * BOX_PROVIDER=upstash fixes boxes on Upstash and BOX_PROVIDER=local on this machine, as before. Otherwise new boxes come
+ * from Settings › Box providers' pool (Upstash Box or Agent37, docs/agent37.md) once that cloud has a key, else folders
+ * on this machine, with no restart: UPSTASH_BOX_API_KEY in the env keeps them on Upstash unless Settings picks Agent37,
+ * and BOX_PROVIDER=agent37 keeps them on Agent37. Every box keeps going to the provider that made it. Without
+ * `credentials` (scripts), only the env counts.
  */
-export function makeProvider(c: Config, credentials?: CredentialStore): BoxProvider {
-  if (c.provider === "upstash") return new UpstashProvider(c, credentials)
+export function makeProvider(c: Config, credentials?: CredentialStore, pool: () => BoxPool = () => "upstash"): BoxProvider {
+  const agent37 = (creds: { get(k: "agent37ApiKey"): string }) =>
+    new Agent37Provider(creds, { template: c.agent37Template, idleSleepSeconds: c.agent37IdleSleepSeconds, workerSize: () => c.workerSize })
+  if (c.provider === "upstash" && (c.boxProvider === "upstash" || !credentials)) return new UpstashProvider(c, credentials)
+  if (c.provider === "agent37" && !credentials) return agent37({ get: () => c.agent37ApiKey })
   const local = new LocalProvider(path.join(c.dataDir, "local-boxes"), c.claudeBin)
   if (!credentials || c.mock || c.boxProvider === "local") return local
-  return new AutoProvider(local, new UpstashProvider(c, credentials), () => Boolean(credentials.get("upstashBoxApiKey")))
+  const has = (k: "upstashBoxApiKey" | "agent37ApiKey") => Boolean(credentials.get(k))
+  const keyed = (): ActivePool[] => [...(has("upstashBoxApiKey") ? ["upstash" as const] : []), ...(has("agent37ApiKey") ? ["agent37" as const] : [])]
+  const onAgent37 = () => (has("agent37ApiKey") ? "agent37" : "local")
+  const active = (): ActivePool => {
+    if (c.provider === "agent37") return onAgent37()
+    if (pool() === "agent37") return c.provider === "upstash" && !has("agent37ApiKey") ? "upstash" : onAgent37()
+    return c.provider === "upstash" || has("upstashBoxApiKey") ? "upstash" : "local"
+  }
+  return new AutoProvider(local, new UpstashProvider(c, credentials), active, agent37(credentials), keyed)
 }
 
 /** The local runner: agents of "Runs on: This computer" projects, in `<localDir>/<task_id>` (BOXYARD_LOCAL_DIR). */
@@ -613,7 +628,7 @@ export function createBoxYard(
     const pod = (cloud === "vast" ? vast : cloud === "daytona" ? daytona : gpu).provider.cached(boxId)
     return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
   }
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, vast.provider, machines.provider, daytona.provider)
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials, () => settings.get().boxPool), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, vast.provider, machines.provider, daytona.provider)
   const setup = new Setup({
     c,
     store,
@@ -950,7 +965,7 @@ export function createBoxYard(
       timezone: { value: c.defaultTimezone, envVar: "BOXYARD_TIMEZONE" },
       maxUploadMb: { value: c.maxUploadMb, envVar: "BOXYARD_MAX_UPLOAD_MB" },
       scheduler: { value: scheduler.mode, envVar: "QSTASH_TOKEN", note: "qstash when QSTASH_TOKEN is set, else local" },
-      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else Upstash once an Upstash key is saved in Settings › Box providers › Upstash boxes" },
+      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else the boxPool setting (upstash or agent37) once that cloud has a key in Settings › Box providers" },
       localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
     }),
     save: { settings: saveSettings, runpod: saveRunpodSettings, vast: saveVastSettings, daytona: saveDaytonaSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },

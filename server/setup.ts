@@ -1,3 +1,4 @@
+import { AGENT37_API } from "./agent37/api.js"
 import { OPENCODE_INSTALL, OPENCODE_LOGIN_HELP, parseOpenCodeAuth } from "./opencode.js"
 // GET /api/setup and the Test buttons behind POST /api/setup/test/:key: what's missing before Box Yard can do real
 // work, and a cheap live check of each credential. Nothing here returns or logs a secret: every message goes
@@ -198,7 +199,9 @@ export class Setup {
       return cursorKey ? null : noCursorKey
     }
     if (runner === "box") {
-      if (c.boxProvider !== "local" && creds.upstashBoxApiKey.state !== "set") return "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Box providers › Upstash boxes"
+      if (this.onAgent37()) {
+        if (creds.agent37ApiKey.state !== "set") return "Agent37 boxes aren't set up: add an Agent37 API key in Settings › Box providers › Agent37 boxes"
+      } else if (c.boxProvider !== "local" && creds.upstashBoxApiKey.state !== "set") return "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Box providers › Upstash boxes"
       // BOX_PROVIDER=local's "boxes" are folders on this computer, where its own cursor-agent login works.
       return cursorKey || c.boxProvider === "local" ? null : noCursorKey
     }
@@ -259,7 +262,8 @@ export class Setup {
     const coordinatorCli = this.d.settings.get().orchestratorCli
     const missing: string[] = []
     // Before the choice, a box key isn't the only way: "This computer" needs none.
-    if (boxesRequired && !set("upstashBoxApiKey")) missing.push(provider === null ? NO_RUNNER_CHOICE : CREDENTIAL_INFO.upstashBoxApiKey.label)
+    const poolKey: CredentialKey = this.onAgent37() ? "agent37ApiKey" : "upstashBoxApiKey"
+    if (boxesRequired && !set(poolKey)) missing.push(provider === null ? NO_RUNNER_CHOICE : CREDENTIAL_INFO[poolKey].label)
     if (onComputer && !mock && local && coordinatorCli === "claude" && !local.tools.find((t) => t.key === "claude")?.found) missing.push("Claude Code on this computer")
     if (!mock && coordinatorCli === "claude" && !claudeSet) missing.push("Claude sign-in")
     if (!mock && coordinatorCli === "codex" && !codexSet) missing.push("Codex sign-in")
@@ -289,7 +293,8 @@ export class Setup {
       github: { state: creds.githubToken.state },
       owner: { name: info.settings.ownerName, source: info.sources.ownerName },
       runner: { choice, provider, default: this.defaultRunner(), installDefault: this.installDefault() },
-      upstash: { available: mock || c.boxProvider === "local" || set("upstashBoxApiKey") },
+      upstash: { available: mock || c.boxProvider === "local" || set(poolKey) },
+      agent37: { active: poolKey === "agent37ApiKey", keySet: set("agent37ApiKey") },
       local,
       restart,
       authorFallbacks: authorFallbacks(this.d.store).flatMap((r) => {
@@ -353,6 +358,7 @@ export class Setup {
     if (key === "runpodApiKey") return this.checkRunPod(value)
     if (key === "vastApiKey") return this.checkVast(value)
     if (key === "daytonaApiKey") return this.checkDaytona(value)
+    if (key === "agent37ApiKey") return this.checkAgent37(value)
     return this.checkGitHub(value)
   }
 
@@ -365,6 +371,32 @@ export class Setup {
     const r = await cursorKeyCheck(this.d.c.cursorBin, key, this.timeoutMs)
     if (!r.ok) throw new Error(r.text)
     return `Cursor accepted the key: ${r.text}.`
+  }
+
+  /**
+   * New pool boxes come from Agent37 (makeProvider in server/app.ts): BOX_PROVIDER=agent37, or Settings › Box providers ›
+   * Agent37 boxes picks it, unless BOX_PROVIDER fixes boxes elsewhere. With UPSTASH_BOX_API_KEY in the env, a pick of
+   * Agent37 counts once Agent37 has a key (until then boxes stay on Upstash).
+   */
+  private onAgent37(): boolean {
+    const { c, credentials } = this.d
+    if (c.mock || c.boxProvider === "local" || c.boxProvider === "upstash") return false
+    if (c.provider === "agent37") return true
+    if (this.d.settings.get().boxPool !== "agent37") return false
+    return c.provider !== "upstash" || Boolean(credentials.get("agent37ApiKey"))
+  }
+
+  /** List the workspace's instances: free, and it never makes anything. */
+  private async checkAgent37(apiKey: string): Promise<string> {
+    const res = await this.request(this.d.fetch, `${AGENT37_API}/v1/instances`, { headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" } }, "Agent37")
+    const body = await res.text().catch(() => "")
+    if (!res.ok) throw new Error(`Agent37 ${res.status === 401 || res.status === 403 ? "rejected the key" : "failed"} (HTTP ${res.status}): ${providerMessage(body) || res.statusText}`)
+    let count: number | null = null
+    try {
+      const data = (JSON.parse(body) as { data?: { status?: string }[] }).data
+      if (Array.isArray(data)) count = data.filter((i) => i?.status !== "deleted").length
+    } catch {}
+    return count === null ? "Works: Agent37 accepted the key." : `Works: Agent37 accepted the key and listed ${count} instance${count === 1 ? "" : "s"} in the workspace.`
   }
 
   /** List the account's boxes. */
