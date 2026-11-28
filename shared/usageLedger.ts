@@ -25,10 +25,11 @@ export type UsageRole = (typeof USAGE_ROLES)[number]
 export const USAGE_ROLE_LABEL: Record<UsageRole, string> = { agent: "Task agents", captain: "Captains", coordinator: "Coordinator", thread: "Side questions" }
 
 /** Where a task's turns ran. Docker, this computer and SSH machines are Cody's own hardware: they cost $0 here. */
-export const COMPUTE_PROVIDERS = ["upstash", "daytona", "runpod", "vast", "docker", "local", "ssh"] as const
+export const COMPUTE_PROVIDERS = ["upstash", "agent37", "daytona", "runpod", "vast", "docker", "local", "ssh"] as const
 export type ComputeProvider = (typeof COMPUTE_PROVIDERS)[number]
 export const COMPUTE_PROVIDER_LABEL: Record<ComputeProvider, string> = {
   upstash: "Upstash box",
+  agent37: "Agent37 box",
   daytona: "Daytona sandbox",
   runpod: "RunPod GPU",
   vast: "Vast.ai GPU",
@@ -37,7 +38,7 @@ export const COMPUTE_PROVIDER_LABEL: Record<ComputeProvider, string> = {
   ssh: "SSH machine",
 }
 /** Providers Box Yard prices; the rest run on Cody's own hardware. */
-export const PAID_PROVIDERS: readonly ComputeProvider[] = ["upstash", "daytona", "runpod", "vast"]
+export const PAID_PROVIDERS: readonly ComputeProvider[] = ["upstash", "agent37", "daytona", "runpod", "vast"]
 
 export const TOKEN_KINDS = ["input", "cacheWrite", "cacheRead", "output"] as const
 export type TokenKind = (typeof TOKEN_KINDS)[number]
@@ -145,9 +146,10 @@ export interface UsageSeries {
 
 /**
  * Categorical colours, validated as a stacked set on the app's dark surface (dataviz validate_palette.js: CVD ΔE ≥ 8,
- * normal-vision ΔE ≥ 15 between neighbours): three model slots, then Upstash, Daytona, RunPod, Vast.ai.
+ * normal-vision ΔE ≥ 15 between neighbours): three model slots, then Upstash, Daytona, RunPod, Vast.ai, Agent37. Agent37
+ * (added later) was checked against Upstash, the series it most often stacks on during a switch: CVD ΔE 15.3, normal 29.1.
  */
-export const USAGE_COLORS = ["#3987e5", "#d95926", "#9085e9", "#199e70", "#c98500", "#d55181", "#008300"] as const
+export const USAGE_COLORS = ["#3987e5", "#d95926", "#9085e9", "#199e70", "#c98500", "#d55181", "#008300", "#b06ad9"] as const
 export const OTHER_COLOR = "#71717a"
 /**
  * Token kinds, bottom of the stack first, on the dark surface. Cache reads are most of every bar, so they are the
@@ -162,7 +164,7 @@ export const TOKEN_COLORS: Record<TokenKind, string> = { input: "#007086", cache
  */
 export const TOKEN_COLORS_LIGHT: Record<TokenKind, string> = { input: "#001d2d", cacheWrite: "#005264", cacheRead: "#6e6e77", output: "#009eb9" }
 const MODEL_SLOTS = 3
-const PROVIDER_COLOR: Partial<Record<ComputeProvider, number>> = { upstash: 3, daytona: 4, runpod: 5, vast: 6 }
+const PROVIDER_COLOR: Partial<Record<ComputeProvider, number>> = { upstash: 3, daytona: 4, runpod: 5, vast: 6, agent37: 7 }
 
 /**
  * Which models get their own colour: the dearest three over the whole loaded range, unfiltered, so a filter never

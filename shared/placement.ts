@@ -78,8 +78,8 @@ export const RUNNER_PLACE: Record<Runner, PlaceKind> = { local: "local", box: "b
 /** The provider's name, as the chip leads with it. */
 export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", box: "Upstash", gpu: "RunPod", docker: "Docker", ssh: "SSH" }
 
-/** "Upstash" for Upstash boxes, "Local box" for mock mode's folder boxes. */
-const boxProviderName = (p: Place) => (p.provider && p.provider !== "upstash" ? (p.provider === "local" ? "Local box" : p.provider) : PLACE_NAME.box)
+/** "Upstash" for Upstash boxes, "Agent37" for Agent37 instances, "Local box" for mock mode's folder boxes. */
+const boxProviderName = (p: Place) => (p.provider && p.provider !== "upstash" ? (p.provider === "local" ? "Local box" : p.provider === "agent37" ? "Agent37" : p.provider) : PLACE_NAME.box)
 
 /** "RunPod", or "Vast.ai" for a Vast.ai instance's box, "Daytona" for a Daytona sandbox's. */
 const gpuPlaceName = (p: Place) => {
