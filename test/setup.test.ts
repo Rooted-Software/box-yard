@@ -83,8 +83,10 @@ describe("GET /api/setup", () => {
       runpodApiKey: { state: "unset", source: null },
       vastApiKey: { state: "unset", source: null },
       daytonaApiKey: { state: "unset", source: null },
+      agent37ApiKey: { state: "unset", source: null },
     })
     expect(body.boxes).toEqual({ provider: "local", required: true })
+    expect(body.agent37).toEqual({ active: false, keySet: false })
     expect(body.claude).toEqual({ required: true, state: "unset", using: null })
     // The Coordinator runs on Claude Code by default, so Codex is optional.
     expect(body.codex).toEqual({ required: false, state: "unset", using: null })
@@ -312,6 +314,41 @@ describe("POST /api/setup/test/:key", () => {
       expect(c.method).toBe("GET")
       expect(c.url).toMatch(/^https:\/\/app\.daytona\.io\/api\/sandbox\?labels=/)
     }
+  })
+
+  it("Agent37: lists the workspace's instances with the key as a bearer token (makes nothing)", async () => {
+    const A37 = "sk_live_secret_agent37_key_0123456789"
+    const calls: { url: string; method: string }[] = []
+    const fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), method: init?.method ?? "GET" })
+      if (new Headers(init?.headers).get("authorization") === `Bearer ${A37}`) return new Response('{"data":[{"id":"a","status":"running"},{"id":"b","status":"deleted"}]}', { status: 200 })
+      return new Response('{"error":{"code":"invalid_api_key","message":"The key is revoked"}}', { status: 401, statusText: "Unauthorized" })
+    }) as typeof globalThis.fetch
+    const { json } = await boot(firstRun({ port: await freePort() }), { setup: { fetch } })
+    expect(await test(json, "agent37ApiKey", A37)).toMatchObject({ ok: true, message: "Works: Agent37 accepted the key and listed 1 instance in the workspace." })
+    const bad = await test(json, "agent37ApiKey", "sk_live_wrong_wrong_wrong_wrong")
+    expect(bad.ok).toBe(false)
+    expect(bad.message).toMatch(/^Agent37 rejected the key \(HTTP 401\)/)
+    expect(bad.message).not.toContain("sk_live_wrong")
+    expect(calls).toEqual([
+      { url: "https://api.agent37.com/v1/instances", method: "GET" },
+      { url: "https://api.agent37.com/v1/instances", method: "GET" },
+    ])
+  })
+
+  it("Agent37 as the pool: its key is the one boxes need", async () => {
+    const { json } = await boot(firstRun({ port: await freePort() }))
+    yard!.settings.update({ boxPool: "agent37" })
+    let { body } = await json<SetupStatus>("GET", "/api/setup")
+    expect(body.agent37).toEqual({ active: true, keySet: false })
+    expect(body.upstash.available).toBe(false)
+    expect(await yard!.setup.runnerProblem("box", true)).toMatch(/^Agent37 boxes aren't set up: add an Agent37 API key/)
+    expect((await json("PUT", "/api/setup/credentials", { agent37ApiKey: "sk_live_secret_agent37_key_0123456789" })).status).toBe(200)
+    ;({ body } = await json<SetupStatus>("GET", "/api/setup"))
+    expect(body.agent37).toEqual({ active: true, keySet: true })
+    expect(body.upstash.available).toBe(true)
+    expect(body.missing).not.toContain("Agent37 API key")
+    expect(await yard!.setup.runnerProblem("box", true)).toBeNull()
   })
 
   it("Claude subscription token: one tiny `claude` call logged in with only that token", async () => {

@@ -295,10 +295,11 @@ export class Agent37Provider implements BoxProvider {
     let offset = 0
     try {
       for (;;) {
-        // The status line first ("done <code> <size>" or "run - <size>"), then up to READ_CHUNK bytes from `offset`.
+        // The status line first ("done <code> <size>" or "run - <size>"), then up to READ_CHUNK bytes from `offset`. The
+        // exit code is looked at before the size: once it's there the output is complete, so the size is final.
         const res = await this.run(
           boxId,
-          `f=${q(`${dir}/out`)}; c=${q(`${dir}/code`)}; s=$(stat -c %s "$f" 2>/dev/null || echo 0); if [ -f "$c" ]; then echo "done $(cat "$c") $s"; else echo "run - $s"; fi; tail -c +${offset + 1} "$f" 2>/dev/null | head -c ${READ_CHUNK} | base64 -w0`,
+          `f=${q(`${dir}/out`)}; c=${q(`${dir}/code`)}; if [ -f "$c" ]; then st="done $(cat "$c")"; else st="run -"; fi; s=$(wc -c < "$f" 2>/dev/null | tr -d ' '); echo "$st \${s:-0}"; tail -c +${offset + 1} "$f" 2>/dev/null | head -c ${READ_CHUNK} | base64 | tr -d '\\n'`,
         )
         if (res.exit_code !== 0 && !res.stdout) throw new Error(`reading output of a running command failed: ${res.stderr.slice(-300)}`)
         const nl = res.stdout.indexOf("\n")
@@ -388,9 +389,9 @@ export class Agent37Provider implements BoxProvider {
       const pieces = Math.ceil(size / WRITE_CHUNK)
       await inParallel(pieces, PARALLEL, async (i) => {
         const b64 = (await piece(i * WRITE_CHUNK, Math.min(WRITE_CHUNK, size - i * WRITE_CHUNK))).toString("base64")
-        ok(await this.run(boxId, `printf %s ${q(b64)} | base64 -d | dd of=${q(tmp)} bs=${WRITE_CHUNK} seek=${i} conv=notrunc status=none`), `piece ${i + 1} of ${pieces}`)
+        ok(await this.run(boxId, `printf %s ${q(b64)} | base64 -d | dd of=${q(tmp)} bs=${WRITE_CHUNK} seek=${i} conv=notrunc 2>/dev/null`), `piece ${i + 1} of ${pieces}`)
       })
-      ok(await this.run(boxId, `[ "$(stat -c %s ${q(tmp)})" = ${size} ] && mv -f ${q(tmp)} ${q(filePath)}`), "size check")
+      ok(await this.run(boxId, `[ "$(wc -c < ${q(tmp)} | tr -d ' ')" = ${size} ] && mv -f ${q(tmp)} ${q(filePath)}`), "size check")
     } catch (err) {
       await this.run(boxId, `rm -f ${q(tmp)}`).catch(() => {})
       throw err
@@ -398,13 +399,13 @@ export class Agent37Provider implements BoxProvider {
   }
 
   async readFile(boxId: string, filePath: string): Promise<Buffer> {
-    const st = await this.run(boxId, `stat -L -c %s ${q(filePath)}`)
+    const st = await this.run(boxId, `[ -f ${q(filePath)} ] && wc -c < ${q(filePath)} | tr -d ' '`)
     if (st.exit_code !== 0) throw new Error(`reading ${filePath} on Agent37 box ${boxId} failed: ${(st.stderr || "no such file").trim().slice(-300)}`)
     const size = Number.parseInt(st.stdout.trim(), 10)
     if (!Number.isFinite(size) || size < 0) throw new Error(`reading ${filePath} on Agent37 box ${boxId} failed: bad size ${st.stdout.slice(0, 40)}`)
     const parts: Buffer[] = new Array(Math.ceil(size / READ_CHUNK))
     await inParallel(parts.length, PARALLEL, async (i) => {
-      const r = await this.run(boxId, `dd if=${q(filePath)} bs=${READ_CHUNK} skip=${i} count=1 status=none | base64 -w0`)
+      const r = await this.run(boxId, `dd if=${q(filePath)} bs=${READ_CHUNK} skip=${i} count=1 2>/dev/null | base64 | tr -d '\\n'`)
       if (r.exit_code !== 0 || r.truncated) throw new Error(`reading ${filePath} on Agent37 box ${boxId} failed (piece ${i + 1}): ${r.stderr.slice(-300)}`)
       parts[i] = Buffer.from(r.stdout.trim(), "base64")
     })
