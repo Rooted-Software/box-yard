@@ -1503,7 +1503,7 @@ export function createBoxYard(
       // ownerCommand: nothing was queued, so the client drops its pending copy for the stored one (closed or not).
       return void res.json({ ...store.getTask(row.id), ownerCommand: true })
     }
-    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, { ...(row ? { agentCli: taskAgentCli(row) } : {}), machineLabel: body.machineLabel, gpu: body.gpu })
+    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, { ...(row ? { agentCli: taskAgentCli(row) } : {}), machineLabel: body.machineLabel, gpu: body.gpu, boxCloud: body.boxCloud })
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn, body.machineLabel, body.gpu, body.boxSize, body.boxCloud)
     const { task, inputId } = tasks.send(req.params.id!, body.content, "cody", files, undefined, undefined, body.id)
     orchestrator.directMessages.record({ taskId: task.id }, body.content)
