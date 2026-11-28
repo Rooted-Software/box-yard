@@ -19,7 +19,7 @@ export function Agent37Panel({ fid, settings }: { fid: (k: string) => string; se
         <Loading count={1} label="Loading the Agent37 key" />
       ) : (
         <Row id={fid("cred-agent37ApiKey")} label={CREDENTIAL_INFO.agent37ApiKey.label} help={<>A workspace key (sk_live_…). Box Yard uses it only on the server, to make, run commands in and delete this install's instances. <CredentialHelp k="agent37ApiKey" /></>}>
-          <CredentialField k="agent37ApiKey" section="agent37" status={s.credentials.agent37ApiKey} id={fid("cred-agent37ApiKey")} />
+          <CredentialField k="agent37ApiKey" section="agent37" status={s.credentials.agent37ApiKey ?? { state: "unset", source: null }} id={fid("cred-agent37ApiKey")} />
         </Row>
       )}
       {!settings ? (
@@ -35,7 +35,7 @@ export function Agent37Panel({ fid, settings }: { fid: (k: string) => string; se
           <div role="radiogroup" aria-label="New pool boxes come from" className="@container grid gap-2 @lg:grid-cols-2">
             {BOX_POOLS.map((p, i) => {
               const on = p === pool
-              const note = p === "agent37" ? (s?.credentials.agent37ApiKey.state === "set" ? "Key configured" : "API key missing") : s?.credentials.upstashBoxApiKey.state === "set" ? "Key configured" : "API key missing"
+              const note = p === "agent37" ? (s?.credentials.agent37ApiKey?.state === "set" ? "Key configured" : "API key missing") : s?.credentials.upstashBoxApiKey?.state === "set" ? "Key configured" : "API key missing"
               return (
                 <button
                   key={p}
@@ -56,7 +56,7 @@ export function Agent37Panel({ fid, settings }: { fid: (k: string) => string; se
               )
             })}
           </div>
-          {pool === "agent37" && s?.credentials.agent37ApiKey.state !== "set" && (
+          {pool === "agent37" && s?.credentials.agent37ApiKey?.state !== "set" && (
             <p className="mt-2 text-xs leading-relaxed text-amber-300" data-testid="agent37-no-key">
               Add the Agent37 API key above: until then new boxes don't come from Agent37.
             </p>
