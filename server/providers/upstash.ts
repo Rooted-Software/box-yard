@@ -34,10 +34,10 @@ export const BOX_GIT_CREDENTIAL_SCRIPT = [
  * Install Claude Code (unless a snapshot already has it) and set up git. No credential is baked into the box: tokens
  * and the git author come with each turn (task.json), so one box never acts as another project's account.
  */
-export function workerSetupScript() {
+export function workerSetupScript(root = ROOT) {
   return [
     "set -e",
-    `mkdir -p ${ROOT}/.boxyard ${ROOT}/tasks`,
+    `mkdir -p ${root}/.boxyard ${root}/tasks`,
     "command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq git >/dev/null)",
     // A snapshot keeps the Claude Code it was made with: one older than the newest model needs is replaced.
     claudeCliFloorScript(),
