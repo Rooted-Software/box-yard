@@ -33,6 +33,7 @@ import { loginName } from "../shared/agentLogins.js"
 import type { TokenUsage } from "./usage.js"
 import type { TurnTrigger } from "./turnTrigger.js"
 import { AUTO_SIZE_WINDOW_MS, type TurnPeak } from "../shared/autoSize.js"
+import { WORKSPACE_WINDOW_MS, type WorkspaceSize } from "../shared/workspaceDisk.js"
 import { TURN_TIMINGS_WINDOW_MS, type TurnRole, type TurnTiming } from "../shared/turnTimings.js"
 import type { LimitHarness, LimitLoginKind, LimitStatus } from "../shared/loginLimits.js"
 import type {
@@ -4141,6 +4142,39 @@ export class Store {
       )
       .run(row.turnId, row.projectId, row.taskId, row.boxId, row.boxSize, row.at, row.memPeakBytes, row.cpuPeakCores, row.cpuBusyCores, row.diskPeakBytes, row.oom ? 1 : 0)
     this.db.prepare("DELETE FROM turn_peaks WHERE at < ?").run(Date.now() - AUTO_SIZE_WINDOW_MS)
+  }
+
+  // ---------- workspace footprints (shared/workspaceDisk.ts) ----------
+
+  /**
+   * A task folder's size on its box (du at the end of a turn). The peak carries over while it stays on the same box;
+   * a reading on another box starts over. Drops readings past the 14-day window as it goes.
+   */
+  recordWorkspaceSize(r: { taskId: string; projectId: string; boxId: string; bytes: number; at?: number }) {
+    const at = r.at ?? Date.now()
+    this.db
+      .prepare(
+        `INSERT INTO workspace_sizes (task_id, project_id, box_id, at, bytes, peak_bytes) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(task_id) DO UPDATE SET
+           peak_bytes = CASE WHEN workspace_sizes.box_id = excluded.box_id THEN MAX(workspace_sizes.peak_bytes, excluded.bytes) ELSE excluded.bytes END,
+           project_id = excluded.project_id, box_id = excluded.box_id, at = excluded.at, bytes = excluded.bytes`,
+      )
+      .run(r.taskId, r.projectId, r.boxId, at, r.bytes, r.bytes)
+    this.db.prepare("DELETE FROM workspace_sizes WHERE at < ?").run(Date.now() - WORKSPACE_WINDOW_MS)
+  }
+
+  /** A project's measured task folders in the last 14 days. */
+  workspaceSizes(projectId: string): WorkspaceSize[] {
+    const rows = this.db
+      .prepare("SELECT task_id, box_id, at, bytes, peak_bytes FROM workspace_sizes WHERE project_id = ? AND at >= ?")
+      .all(projectId, Date.now() - WORKSPACE_WINDOW_MS) as { task_id: string; box_id: string; at: number; bytes: number; peak_bytes: number }[]
+    return rows.map((r) => ({ taskId: r.task_id, boxId: r.box_id, at: r.at, bytes: r.bytes, peakBytes: r.peak_bytes }))
+  }
+
+  /** A task folder's last reading, when it was taken on `boxId`. */
+  workspaceSizeOn(taskId: string, boxId: string): number | null {
+    const row = this.db.prepare("SELECT bytes FROM workspace_sizes WHERE task_id = ? AND box_id = ?").get(taskId, boxId) as { bytes: number } | undefined
+    return row?.bytes ?? null
   }
 
   /** A project's measured turns in the last 14 days, oldest first. */

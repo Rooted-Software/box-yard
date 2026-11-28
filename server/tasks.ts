@@ -105,6 +105,7 @@ import { turnTiming } from "./turnTimings.js"
 import { perfMark, perfSpan } from "./perfTrace.js"
 import type { TurnClockReading } from "../shared/turnTimings.js"
 import { pickAutoSize, type ProjectAutoSize, type TurnPeak } from "../shared/autoSize.js"
+import { expectedWorkspaceBytes, footprintLabel, parseWorkspaceDu, workspaceDuCommand, workspaceFootprint, workspaceGrowth, workspacesThatFit, type WorkspaceFootprint } from "../shared/workspaceDisk.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import type { BoxPick } from "../shared/placement.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
@@ -118,6 +119,7 @@ import {
   BOX_SIZE_SPECS,
   scaleDownFit as scaleDownFitCheck,
   sizeSpecLine,
+  workDiskBytes,
   type BoxResize,
   type DiskFit,
   type ResizeInitiator,
@@ -753,6 +755,8 @@ export class TaskManager {
   private meter = new TurnMeter()
   /** Auto-sizing: each project's measured turns (table turn_peaks), read once and dropped when another lands. */
   private turnPeakCache = new Map<string, TurnPeak[]>()
+  /** Workspace footprints: each project's measured task folders (table workspace_sizes), dropped when another lands. */
+  private footprintCache = new Map<string, WorkspaceFootprint | null>()
   /** Running turns' server side, for their timings (turn_timings): when they were asked for and launched, by turn id. */
   private turnLaunches = new Map<string, { requestedAt: number | null; launchedAt: number; trigger: string | null; model: string | null; effort: string | null; resumed: boolean }>()
   /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
@@ -2431,10 +2435,22 @@ export class TaskManager {
     return {
       boxSize: p.boxSize ? own(p.boxSize) : this.autoSizeLine(p.id),
       agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its tasks at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Tasks running at once per box"),
-      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Task folders kept per box"),
+      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : (this.autoTasksPerBoxLine(p.id) ?? global("maxResidentPerBox", "Task folders kept per box")),
       maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
       ...(p.wholeMachine ? { wholeMachine: "yes: no other project's task starts on a box or this computer while one of its tasks runs there" } : {}),
     }
+  }
+
+  /**
+   * "auto: small 1, medium 2, large 3 by disk (7.1 GB per workspace …)": Task folders per box from the project's
+   * measured workspaces (`foldersThatFit`), each held to the box's own limit. Null while unmeasured. Agents on a box
+   * never outnumber its task folders, so this bounds how many of its tasks run on one box too.
+   */
+  private autoTasksPerBoxLine(projectId: string): string | null {
+    const f = this.workspaceFootprint(projectId)
+    if (!f) return null
+    const per = BOX_SIZES.map((z) => `${z} ${Math.min(this.sizeLimits(z).maxResidentPerBox, this.foldersThatFit(projectId, z) ?? Infinity)}`)
+    return `auto: ${per.join(", ")} by disk (${footprintLabel(f)}; each box keeps the free-space floor)`
   }
 
   /** A project's box size when it has none of its own: what auto-sizing picked, else Settings › Worker size. */
@@ -3831,7 +3847,7 @@ export class TaskManager {
       if (!shared) this.claimedSlots.set(turnId, slots)
       if (isLocalRunnerBox(boxId)) this.localStarts.push(Date.now())
       // A workspace about to be made here takes disk the next placement mustn't count on.
-      if (row.box_id !== boxId) this.reserve(boxId, row.id, this.cloneBytes(row) ?? 0)
+      if (row.box_id !== boxId) this.reserve(boxId, row.id, Math.max(this.cloneBytes(row) ?? 0, this.expectedWorkspace(row.project_id) ?? 0))
       this.store.touchBox(boxId)
       this.emitTask(row.id)
       void this.launch(row.id, boxId, turnId)
@@ -5469,7 +5485,7 @@ export class TaskManager {
         // 0 = this project's box, 1 = empty unowned box, 2 = another project's box
         const rank = mine ? 0 : others ? 2 : 1
         const limits = this.sizeLimits(normalizeBoxSize(b.size))
-        const maxResidentPerBox = this.residentCap(limits.maxResidentPerBox, projectId, residents)
+        const maxResidentPerBox = this.residentCap(limits.maxResidentPerBox, projectId, residents, normalizeBoxSize(b.size))
         return { id: b.id, rank, running: residents.filter(holdsSlot).length, residents: residents.length, slotsPerBox: limits.slotsPerBox, maxResidentPerBox }
       })
       .filter((b) => b.running < b.slotsPerBox)
@@ -5643,8 +5659,8 @@ export class TaskManager {
     // df failing shouldn't stop work; a real shortage shows up as ENOSPC and is retried.
     if (this.stopped || !space) return "ok"
     const need = this.diskNeed(row)
-    let pending = 0
-    for (const [id, bytes] of this.reserved.get(boxId) ?? []) if (id !== row.id) pending += bytes
+    // Workspaces being set up there, and what its running turns' folders have yet to grow by, aren't in df yet.
+    const pending = this.pendingDisk(boxId, row.id)
     if (space.freeBytes - pending >= need) {
       if (this.lowBoxes.delete(boxId)) this.emitBoxes()
       return "ok"
@@ -5786,15 +5802,24 @@ export class TaskManager {
 
   /**
    * Task folders a box may hold with this project's: the box's own limit, or less when the project or one with a
-   * folder there (`residents`) sets Tasks per box. The stricter wins, like Agents per box.
+   * folder there (`residents`) sets Tasks per box. The stricter wins, like Agents per box. A project that sets none
+   * gets as many as its measured workspaces fit the box's disk (`tasksPerBoxFor`).
    */
-  private residentCap(boxLimit: number, projectId: string | undefined, residents: TaskRow[]): number {
+  private residentCap(boxLimit: number, projectId: string | undefined, residents: TaskRow[], size: BoxSize): number {
     let cap = boxLimit
     for (const p of new Set([...(projectId ? [projectId] : []), ...residents.map((r) => r.project_id)])) {
-      const n = this.store.projectBoxLimits(p).tasksPerBox
+      const n = this.tasksPerBoxFor(p, size)
       if (n !== null && n < cap) cap = n
     }
     return cap
+  }
+
+  /**
+   * A project's Tasks per box on a box of `size`: its own setting, else as many of its workspaces as fit the box's
+   * disk with the free-space floor left (`foldersThatFit`, from its measured footprint), or null when neither says.
+   */
+  private tasksPerBoxFor(projectId: string, size: BoxSize): number | null {
+    return this.store.projectBoxLimits(projectId).tasksPerBox ?? this.foldersThatFit(projectId, size)
   }
 
   /**
@@ -5877,10 +5902,85 @@ export class TaskManager {
     this.meter.sample({ boxId, boxSize, memory, diskUsedBytes: Math.max(0, space.totalBytes - space.freeBytes), turns, diskOwner, now })
   }
 
-  /** Free disk a new workspace for `row` needs (Settings: the floor, or cloneFactor x its repo's last clone size). */
+  /**
+   * Free disk a new workspace for `row` needs: the largest of Settings' floor, cloneFactor x its repo's last clone
+   * size, and what its project's workspaces grow to (`expectedWorkspace`: the 14-day peak with headroom).
+   */
   private diskNeed(row: TaskRow | null): number {
     const s = this.settings.get()
-    return requiredFreeBytes({ minFreeMb: s.diskMinFreeMb, cloneFactor: s.diskCloneFactor }, row ? this.cloneBytes(row) : null)
+    const base = requiredFreeBytes({ minFreeMb: s.diskMinFreeMb, cloneFactor: s.diskCloneFactor }, row ? this.cloneBytes(row) : null)
+    return Math.max(base, row ? (this.expectedWorkspace(row.project_id) ?? 0) : 0)
+  }
+
+  /** A project's workspace footprint (shared/workspaceDisk.ts): its biggest task folder of the last 14 days, or null. */
+  workspaceFootprint(projectId: string): WorkspaceFootprint | null {
+    if (!this.footprintCache.has(projectId)) this.footprintCache.set(projectId, workspaceFootprint(this.store.workspaceSizes(projectId)))
+    return this.footprintCache.get(projectId) ?? null
+  }
+
+  /** The disk one of a project's workspaces is expected to take (its footprint with headroom), or null when unmeasured. */
+  private expectedWorkspace(projectId: string): number | null {
+    return expectedWorkspaceBytes(this.workspaceFootprint(projectId))
+  }
+
+  /**
+   * What a task folder on `boxId` may still grow by: its project's expected footprint less its last reading there
+   * (or, unmeasured, its repo's clone size).
+   */
+  private workspaceGrowth(row: TaskRow, boxId: string): number {
+    return workspaceGrowth(this.expectedWorkspace(row.project_id), this.store.workspaceSizeOn(row.id, boxId) ?? this.cloneBytes(row))
+  }
+
+  /**
+   * Disk on a box that free space doesn't show is spoken for yet: workspaces being set up there (`reserved`), and what
+   * the folders of turns running or starting there may still grow by. `except` (the task being placed) is left out.
+   */
+  private pendingDisk(boxId: string, except?: string): number {
+    let pending = 0
+    const counted = new Set<string>()
+    for (const [id, bytes] of this.reserved.get(boxId) ?? []) {
+      counted.add(id)
+      if (id !== except) pending += bytes
+    }
+    for (const r of this.store.listTaskRows({ boxId })) {
+      if (r.id === except || counted.has(r.id) || !holdsSlot(r)) continue
+      pending += this.workspaceGrowth(r, boxId)
+    }
+    return pending
+  }
+
+  /**
+   * Task folders of a project a box of `size` holds by its disk: its work disk less the free-space floor, over the
+   * project's expected footprint. Null when unmeasured.
+   */
+  private foldersThatFit(projectId: string, size: BoxSize): number | null {
+    const total = Number(this.store.getKv(diskTotalKey(size)) ?? NaN)
+    const disk = workDiskBytes(size, Number.isFinite(total) && total > 0 ? total : null)
+    return workspacesThatFit(disk, this.settings.get().diskMinFreeMb * 1024 * 1024, this.expectedWorkspace(projectId))
+  }
+
+  /**
+   * Measure a task folder's size on its box after a turn (du), for its project's footprint. Upstash and other cloud
+   * boxes only: a folder on this computer or an SSH machine doesn't take a box's disk.
+   */
+  private async measureWorkspace(taskId: string, boxId: string) {
+    if (!this.store.getBox(boxId) || this.stopped) return
+    const row = this.store.getTaskRow(taskId)
+    if (!row || row.box_id !== boxId) return
+    const res = await this.provider.exec(boxId, workspaceDuCommand(this.taskDir(boxId, taskId))).catch(() => null)
+    if (this.stopped || !res || res.exitCode !== 0) return
+    const bytes = parseWorkspaceDu(res.stdout)
+    // The folder may have left the box meanwhile (parked, moved): a reading only counts for where it is.
+    if (bytes === null || this.store.getTaskRow(taskId)?.box_id !== boxId) return
+    this.noteWorkspaceSize(taskId, boxId, bytes)
+  }
+
+  /** Record a task folder's size on its box (workspace_sizes) for its project's footprint. */
+  noteWorkspaceSize(taskId: string, boxId: string, bytes: number) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row) return
+    this.store.recordWorkspaceSize({ taskId, projectId: row.project_id, boxId, bytes })
+    this.footprintCache.delete(row.project_id)
   }
 
   /** The task's repo's last measured clone size, if Box Yard has cloned it before. */
@@ -7844,6 +7944,8 @@ export class TaskManager {
     this.returnSteer(row)
     // Auto-sizing: what the turn used on its box, and whether it ran out of memory there.
     const measured = this.recordTurnPeak(row.current_turn_id, ev, !ev.ok && !ev.stopped && !this.stopRequested.has(row.id))
+    // Its folder's size on the box now, for its project's workspace footprint (what placement reserves for the next).
+    if (row.box_id) void this.measureWorkspace(row.id, row.box_id)
     const timing = this.recordTurnTiming(row, ev)
     const unknownModel = this.unknownModelError(row, ev)
     if (row.compacting) return this.finishCompact(row, ev)

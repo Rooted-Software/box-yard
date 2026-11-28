@@ -247,6 +247,75 @@ describe("low-disk placement", () => {
   })
 })
 
+describe("workspace footprint", () => {
+  it("measures each task folder after its turn, and reserves the project's footprint for a new workspace", async () => {
+    const r = await start({ maxBoxes: 2, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    const measured = await waitFor(() => r.yard.store.workspaceSizes(p.id).find((s) => s.taskId === first.id), "the folder's size after the turn")
+    expect(measured.boxId).toBe(box)
+    expect(measured.bytes).toBeGreaterThan(0)
+
+    // Its folders grow to 3 GB in a turn (dependencies, LFS, builds): 2 GB free is far over the 500 MB floor, but
+    // not room for another.
+    r.yard.tasks.noteWorkspaceSize(first.id, box, 3 * GB)
+    expect(r.yard.tasks.workspaceFootprint(p.id)).toEqual({ peakBytes: 3 * GB, tasks: 1 })
+    // A 20 GB disk (so Task folders kept per box still fits a few) with 2 GB free.
+    ballast(path.join(r.provider.root(box), "other"), 18 * GB)
+    r.provider.fill(box, 2 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    const second = await until(r, (await task(r, p.id, "second")).id, "idle")
+    expect(second.boxId).not.toBe(box)
+    expect(events(r, second.id)).toContain(`Waiting for a new box: ${box} is low on disk.`)
+    const cleanup = await cleanupDone(r, box)
+    // What it aimed for: the footprint with 25% headroom.
+    expect(cleanup.targetFreeBytes).toBe(3.75 * GB)
+  })
+
+  it("counts what running neighbours' folders have yet to grow by", async () => {
+    const r = await start({ maxBoxes: 2, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    // 1 GB folders (1.25 GB expected), 2 GB free: room for one more, unless a turn running there still grows.
+    r.yard.tasks.noteWorkspaceSize(first.id, box, 1 * GB)
+    ballast(path.join(r.provider.root(box), "other"), 18 * GB)
+    r.provider.fill(box, 2 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    const hanging = await task(r, p.id, "hangs", "write a haiku [hang]")
+    await waitFor(async () => (await getTask(r, hanging.id)).status === "working", "the hanging turn")
+    expect((await getTask(r, hanging.id)).boxId).toBe(box)
+    r.provider.fill(box, 2 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    // The hanging task's folder is barely cloned: it may grow by most of 1.25 GB, so 2 GB doesn't fit another.
+    const third = await until(r, (await task(r, p.id, "third")).id, "idle")
+    expect(third.boxId).not.toBe(box)
+    expect(events(r, third.id)).toContain(`Waiting for a new box: ${box} is low on disk.`)
+    await call(r, "POST", `/api/tasks/${hanging.id}/stop`)
+  })
+
+  it("fits Task folders kept per box to the project's footprint", async () => {
+    const r = await start({ maxBoxes: 1, archiveWorkspaces: false })
+    const p = await project(r, "alpha")
+    const first = await until(r, (await task(r, p.id, "first")).id, "idle")
+    const box = first.boxId!
+    await r.yard.tasks.probeDisk(box, 0)
+    const total = (await boxes(r)).find((b) => b.id === box)!.diskTotalBytes!
+    // Folders that take 45% of the disk: one fits a box of this size, though it has room to spare right now.
+    r.yard.tasks.noteWorkspaceSize(first.id, box, Math.floor((total * 0.45) / 1.25) * 1.25)
+    const line = r.yard.tasks.projectBoxSettings({ ...(r.yard.store.getProject(p.id) as Project) }).tasksPerBox
+    expect(line).toMatch(/^auto: small \d+, medium \d+, large \d+ by disk \(.+ per workspace \(peak of 1 task in 14 days\); each box keeps the free-space floor\)$/)
+    const second = await task(r, p.id, "second")
+    const waiting = await waitFor(async () => {
+      const t = await getTask(r, second.id)
+      return t.status === "queued" && t.waitReason ? t : null
+    }, "the second task to wait")
+    expect(waiting.boxId).toBeNull()
+    expect(r.yard.store.listTaskRows({ boxId: box }).map((t) => t.id)).toEqual([first.id])
+  })
+})
+
 describe("out of space during setup", () => {
   it("cleans up and retries once, then the task runs", async () => {
     const r = await start({ maxBoxes: 1, archiveWorkspaces: false })
