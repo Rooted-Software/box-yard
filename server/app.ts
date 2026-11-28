@@ -673,6 +673,7 @@ export function createBoxYard(
     gpu: { default: (projectId) => (projectId ? tasks.gpuCloudOf(projectId) : settings.get().gpuProvider), types: (cloud) => tasks.gpuTypesOf(cloud) },
     machines: () => machineActions.status(),
     identityProblem: (projectId, runner) => identities.runnerProblem(identities.idOf(projectId), runner),
+    boxClouds: () => provider.pools?.() ?? [],
     // The "!" list: create_task's own check, with the project's keys when there's a project.
     harnessProblem: (cli, runner, projectId) =>
       projectId ? tasks.requireRunner(runner, projectId, {}, { agentCli: cli }).then(() => null, (err: Error) => err.message) : setup.runnerProblem(runner, undefined, cli),

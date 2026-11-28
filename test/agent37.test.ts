@@ -13,6 +13,8 @@ import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
 import { AGENT37_SHAPES, agent37Size, isAgent37Box } from "../shared/agent37.js"
 import { environmentRunner } from "../server/taskEnvironment.js"
+import { buildRunTargets } from "../shared/runTargets.js"
+import { resolveRunsOn } from "../shared/machines.js"
 import { FAKE_CLAUDE, testConfig, tmpDir } from "./helpers.js"
 
 // Agent37 instances as pool boxes (docs/agent37.md). Nothing here talks to Agent37: every call goes to a fake transport
@@ -544,5 +546,22 @@ describe("choosing Agent37 for pool boxes", () => {
     expect(makeProvider({ ...live, provider: "agent37", boxProvider: "agent37" })).toBeInstanceOf(Agent37Provider)
     expect(boxIdOf("ab12cd34ef")).toBe("agent37-ab12cd34ef")
     db.close()
+  })
+})
+
+describe("the chat's @ list", () => {
+  const base = { problems: { local: null, box: null, docker: "no docker", gpu: "no gpu" }, machines: [], localLabel: null }
+  it("offers @agent37 and @upstash, with sizes, once Agent37 has a key", () => {
+    const tokens = buildRunTargets({ ...base, boxClouds: ["upstash", "agent37"] }).map((t) => t.token)
+    expect(tokens).toEqual(expect.arrayContaining(["box", "box:small", "upstash", "upstash:large", "agent37", "agent37:small", "agent37:medium", "agent37:large"]))
+    const a37 = buildRunTargets({ ...base, boxClouds: ["agent37"] }).find((t) => t.token === "agent37:small")!
+    expect(a37).toMatchObject({ value: "agent37:small", label: "Agent37 Small", detail: "2 vCPU · 4 GB RAM · 12 GB disk", under: "agent37" })
+    expect(resolveRunsOn(a37.value, null, null)).toMatchObject({ runner: "box", boxCloud: "agent37", boxSize: "small" })
+  })
+  it("has no cloud rows while Upstash is the only cloud", () => {
+    for (const boxClouds of [undefined, ["upstash"] as const]) {
+      const tokens = buildRunTargets({ ...base, ...(boxClouds ? { boxClouds } : {}) }).map((t) => t.token)
+      expect(tokens.some((t) => t.startsWith("agent37") || t.startsWith("upstash"))).toBe(false)
+    }
   })
 })

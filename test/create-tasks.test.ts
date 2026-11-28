@@ -318,6 +318,30 @@ describe("create_tasks", () => {
     expect(store.getTaskRow(res.tasks[0].id)!.source).toBe(`captain:${alpha.id}`)
   })
 
+  it("takes runs_on agent37 and upstash (with a size) for one task, and box_cloud for a project, as a Captain", async () => {
+    const r = await start()
+    const { store } = r.yard
+    const p = store.createProject({ name: "clouds" })
+    const captain = await mcpAs(r, { kind: "captain", projectId: p.id })
+    const one = await captain.json("create_task", { project: "clouds", title: "On Agent37", prompt: "a", runs_on: "agent37:small" })
+    expect(store.getTask(one.id)).toMatchObject({ runsOn: "box", boxCloud: "agent37", boxSize: "small" })
+    const batch = await captain.json("create_tasks", { project: "clouds", runs_on: "agent37", tasks: [{ title: "Shared", prompt: "b" }, { title: "Own", prompt: "c", runs_on: "upstash" }] })
+    expect(batch.tasks.map((t: { id: string }) => store.getTask(t.id)!.boxCloud)).toEqual(["agent37", "upstash"])
+    const plain = await captain.json("create_task", { project: "clouds", title: "Plain box", prompt: "d", runs_on: "box" })
+    expect(store.getTask(plain.id)!.boxCloud).toBeNull()
+    // send_to_task moves it over for its next turns.
+    await captain.json("send_to_task", { task: plain.id, message: "carry on there", runs_on: "agent37" })
+    expect(store.getTask(plain.id)!.boxCloud).toBe("agent37")
+    expect(store.listTaskMessages(plain.id, 50).map((m) => m.content).join("\n")).toMatch(/Runs on an Agent37 box from its next turn on/)
+    expect(await captain.error("create_task", { project: "clouds", title: "Bad", prompt: "e", runs_on: "agent37:huge" })).toMatch(/Unknown box size "huge"/)
+
+    const updated = await captain.json("update_project", { box_cloud: "agent37" })
+    expect(store.getProject(p.id)!.boxCloud).toBe("agent37")
+    expect(JSON.stringify(updated)).toMatch(/Agent37 \(this project\)/)
+    await captain.json("update_project", { box_cloud: null })
+    expect(store.getProject(p.id)!.boxCloud).toBeNull()
+  })
+
   it("takes runs_on per item and as a shared default, and checks every runner before creating anything", async () => {
     const r = await start()
     const { store } = r.yard

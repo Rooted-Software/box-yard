@@ -19,6 +19,7 @@ import { GPU_PROVIDER_LABEL, GPU_PROVIDERS, type GpuProvider } from "./gpu.js"
 import { gpuChoices, gpuTypesWords } from "./gpuCatalog.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS, sizeSpecLine } from "./boxSizes.js"
 import { DAYTONA_SIZES } from "./daytona.js"
+import { AGENT37_SHAPES, BOX_POOLS, type BoxPool } from "./agent37.js"
 import { DAYTONA_SIZE_ALIASES } from "./runnerSizes.js"
 import { rankPickerOptions, type PickerField } from "./pickerRank.js"
 import type { Effort } from "./types.js"
@@ -100,6 +101,11 @@ export interface RunTargetSources {
    * settings name). Without it, "@gpu" is one row.
    */
   gpu?: { default: GpuProvider; problems: Record<GpuProvider, string | null>; types: Record<GpuProvider, readonly string[]> }
+  /**
+   * The clouds pool boxes can come from now (each with a key, docs/agent37.md). With Agent37 among them, "@agent37" and
+   * "@upstash" (with sizes) pick one for a task; without it, "@box" is the only pool-box row.
+   */
+  boxClouds?: readonly BoxPool[]
 }
 
 const HIDDEN_WHEN_UNAVAILABLE: Runner[] = ["docker", "gpu"]
@@ -135,6 +141,14 @@ export function buildRunTargets(s: RunTargetSources): RunTarget[] {
   }
   out.push({ token: "box", value: "box", kind: "runner", label: "Upstash box", detail: "A cloud sandbox", disabled: blocked("box", s.problems.box), defaultLabel: "Default size" })
   out.push(...BOX_SIZE_ORDER.map((size): RunTarget => ({ token: `box:${size}`, aliases: [`box-${size}`], value: `box:${size}`, kind: "runner", label: `Upstash ${BOX_SIZE_SPECS[size].label}`, detail: sizeSpecLine(size), disabled: blocked("box", s.problems.box), under: "box" })))
+  if (s.boxClouds?.includes("agent37")) {
+    for (const cloud of BOX_POOLS.filter((c) => s.boxClouds!.includes(c))) {
+      const name = cloud === "agent37" ? "Agent37" : "Upstash"
+      const disabled = s.identityProblem?.("box") ?? null
+      out.push({ token: cloud, value: cloud, kind: "runner", label: `${name} box`, detail: `A pool box on ${name}, whatever the project's cloud`, disabled, defaultLabel: "Default size" })
+      out.push(...BOX_SIZE_ORDER.map((size): RunTarget => ({ token: `${cloud}:${size}`, aliases: [`${cloud}-${size}`], value: `${cloud}:${size}`, kind: "runner", label: `${name} ${BOX_SIZE_SPECS[size].label}`, detail: cloud === "agent37" ? `${AGENT37_SHAPES[size].cpu} vCPU · ${AGENT37_SHAPES[size].memory} GB RAM · ${AGENT37_SHAPES[size].disk} GB disk` : sizeSpecLine(size), disabled, under: cloud })))
+    }
+  }
   for (const runner of ["docker", "gpu"] as const) {
     const problem = s.gpu && runner === "gpu" ? s.gpu.problems[s.gpu.default] : s.problems[runner]
     if (problem && HIDDEN_WHEN_UNAVAILABLE.includes(runner)) continue
