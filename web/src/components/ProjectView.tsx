@@ -1,3 +1,4 @@
+import { BOX_POOLS, BOX_POOL_LABEL, type BoxPool } from "../../../shared/agent37"
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import { Bot, Boxes, Check, FolderGit2, GitPullRequest, ImageUp, KeyRound, NotebookPen, ShieldAlert, Trash2, Variable, X } from "lucide-react"
@@ -92,6 +93,8 @@ function ProjectBoxSettings(p: {
   ssh: boolean
   boxSize: BoxSize | ""
   setBoxSize: (v: BoxSize | "") => void
+  boxCloud: BoxPool | ""
+  setBoxCloud: (v: BoxPool | "") => void
   agentsPerBox: string
   setAgentsPerBox: (v: string) => void
   wholeMachine: boolean
@@ -105,7 +108,7 @@ function ProjectBoxSettings(p: {
   machine: MachineDraft
   setMachine: (v: MachineDraft) => void
   /** Differs from what the form opened with: the field says "unsaved". */
-  changed: (field: "boxSize" | "agentsPerBox" | "wholeMachine" | "tasksPerBox" | "maxBoxes" | "gpuMaxHourlyUsd") => boolean
+  changed: (field: "boxSize" | "boxCloud" | "agentsPerBox" | "wholeMachine" | "tasksPerBox" | "maxBoxes" | "gpuMaxHourlyUsd") => boolean
   machineChanged: (field: keyof MachineDraft) => boolean
 }) {
   const runpod = useRunPod({ enabled: p.gpu })
@@ -169,6 +172,26 @@ function ProjectBoxSettings(p: {
           </>
         </HelpMore>
       </p>
+      {/* Which cloud its pool boxes come from (docs/agent37.md). A choice already made stays, so it can be cleared. */}
+      {(onBoxes || p.boxCloud) && <OverrideField
+        id="project-box-cloud"
+        label="Box cloud"
+        global={`${BOX_POOL_LABEL[p.info?.settings.boxPool ?? "upstash"]} (Settings › Box providers)`}
+        set={Boolean(p.boxCloud)}
+        changed={p.changed("boxCloud")}
+        onClear={() => p.setBoxCloud("")}
+        hint="Where this project's boxes come from. Its tasks run only on that cloud's boxes; a task can still pick its own with @agent37 or @upstash."
+        more="A resting task on the other cloud moves over before its next turn, once its archive holds its work. Agent37 needs its API key in Settings › Box providers › Agent37 boxes."
+      >
+        <Select id="project-box-cloud" className="w-full min-w-0 @md:w-80" value={p.boxCloud} onChange={(e) => p.setBoxCloud(e.target.value as BoxPool | "")} data-testid="project-box-cloud">
+          <option value="">Global: {BOX_POOL_LABEL[p.info?.settings.boxPool ?? "upstash"]}</option>
+          {BOX_POOLS.map((cloud) => (
+            <option key={cloud} value={cloud}>
+              {BOX_POOL_LABEL[cloud]}
+            </option>
+          ))}
+        </Select>
+      </OverrideField>}
       {/* An Upstash box size: other runners have their own (GPU machine below, Docker's and Daytona's settings, an SSH machine's own). A size already set stays, so it can be cleared. */}
       {(onBoxes || p.boxSize) && <OverrideField
         id="project-box-size"
@@ -924,7 +947,7 @@ export const PROJECT_SECTIONS: (SettingsTab<ProjectSection> & { description: str
 const PROJECT_FIELDS = {
   general: ["name", "description", "repo", "baseBranch", "color", "icon", "captainIcon"],
   agents: ["runner", "machineLabel", "docker", "agentCli", "identityId"],
-  boxes: ["boxSize", "agentsPerBox", "wholeMachine", "tasksPerBox", "maxBoxes", "gpuMaxHourlyUsd", "machine", "depCache"],
+  boxes: ["boxCloud", "boxSize", "agentsPerBox", "wholeMachine", "tasksPerBox", "maxBoxes", "gpuMaxHourlyUsd", "machine", "depCache"],
   git: ["partialClone", "pushAtTurnEnd", "autoDoneOnMerge", "closeIssuesOnMerge"],
   notes: ["notesMax", "notesTokens"],
   env: ["env", "removeKeys"],
@@ -997,6 +1020,7 @@ function ProjectSettingsForm({
   // "" follows Settings › Box agents › Agent.
   const [agentCli, setAgentCli] = useState<AgentCli | "">(project.agentCli ?? "")
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
+  const [boxCloud, setBoxCloud] = useState<BoxPool | "">(project.boxCloud ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
   const [depCache, setDepCache] = useState<"" | "on" | "off">(project.depCache === null || project.depCache === undefined ? "" : project.depCache ? "on" : "off")
@@ -1073,7 +1097,7 @@ function ProjectSettingsForm({
   const drafts: Record<ProjectField, unknown> = {
     name, description, repo, baseBranch, color, icon: icon.kind === "new" ? icon.url : icon.kind, captainIcon,
     runner, machineLabel: runner === "ssh" ? machineLabel : "", docker, agentCli, identityId,
-    boxSize, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, depCache,
+    boxCloud, boxSize, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, depCache,
     partialClone, pushAtTurnEnd, autoDoneOnMerge, closeIssuesOnMerge,
     notesMax, notesTokens,
     env, removeKeys,
@@ -1174,6 +1198,7 @@ function ProjectSettingsForm({
           runner,
           ...(runner === "ssh" ? { machineLabel: machineLabel || null } : {}),
           boxSize: boxSize || null,
+          boxCloud: boxCloud || null,
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
           depCache: depCache ? depCache === "on" : null,
@@ -1367,6 +1392,8 @@ function ProjectSettingsForm({
               ssh={runner === "ssh"}
               boxSize={boxSize}
               setBoxSize={setBoxSize}
+              boxCloud={boxCloud}
+              setBoxCloud={setBoxCloud}
               agentsPerBox={agentsPerBox}
               setAgentsPerBox={setAgentsPerBox}
               wholeMachine={wholeMachine}

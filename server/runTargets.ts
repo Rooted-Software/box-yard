@@ -6,6 +6,7 @@ import { buildHarnessTargets, buildRunTargets, findRunTarget, inlinePicksOf, pic
 import { resolveRunsOn, type MachineSettings, type MachineStatus } from "../shared/machines.js"
 import type { Runner } from "../shared/runner.js"
 import { GPU_PROVIDERS, type GpuProvider } from "../shared/gpu.js"
+import type { BoxPool } from "../shared/agent37.js"
 import { AGENT_CLI_LABEL, AGENT_CLIS, type AgentCli } from "../shared/agentCli.js"
 import { withOwner } from "../shared/owner.js"
 import { BadRequestError } from "./store.js"
@@ -31,6 +32,8 @@ export interface RunTargetDeps {
   defaultRunner?: (projectId: string | null) => Runner
   /** Shared Settings defaults and installed model catalogs for the harness's optional model/effort submenu. */
   harnessModels?: (cli: AgentCli) => Promise<HarnessPickSources>
+  /** The clouds pool boxes can come from now (BoxProvider.pools): with Agent37 among them, "@agent37" and "@upstash". */
+  boxClouds?: () => readonly BoxPool[]
 }
 
 /** The "@" list for the Coordinator (no project) or a project's Captain (its identity may rule runners out). */
@@ -46,6 +49,7 @@ export async function listRunTargets(d: RunTargetDeps, projectId?: string | null
     machines,
     localLabel: settings.localLabel,
     identityProblem: projectId && d.identityProblem ? (runner) => d.identityProblem!(projectId, runner) : undefined,
+    ...(d.boxClouds ? { boxClouds: d.boxClouds() } : {}),
     ...(d.gpu && clouds
       ? {
           gpu: {

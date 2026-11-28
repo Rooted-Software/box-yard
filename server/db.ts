@@ -1356,6 +1356,28 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX workspace_sizes_project ON workspace_sizes(project_id, at);
   `,
+  // Agent37 (docs/agent37.md): the cloud a task's or a project's pool boxes come from ('upstash' or 'agent37');
+  // null follows the project, then Settings › Box providers.
+  `
+  ALTER TABLE tasks ADD COLUMN box_cloud TEXT;
+  ALTER TABLE projects ADD COLUMN box_cloud TEXT;
+  -- The provider the box was on ('upstash', 'agent37', 'local', 'docker', …), so the history says where it ran.
+  ALTER TABLE box_events ADD COLUMN provider TEXT;
+  `,
+  `
+  -- Agent37 is a physical environment too (taskEnvironment.ts): the CHECK on environment_type gains 'agent37'. SQLite
+  -- can't change a CHECK in place, so the column is copied to a new one that allows it, then takes its name back,
+  -- and the trigger that keeps it immutable is made again.
+  ALTER TABLE tasks ADD COLUMN environment_type_v2 TEXT CHECK (environment_type_v2 IN ('upstash', 'agent37', 'docker', 'local', 'ssh', 'runpod', 'vast', 'daytona'));
+  UPDATE tasks SET environment_type_v2 = environment_type;
+  DROP TRIGGER tasks_environment_immutable;
+  ALTER TABLE tasks DROP COLUMN environment_type;
+  ALTER TABLE tasks RENAME COLUMN environment_type_v2 TO environment_type;
+  CREATE TRIGGER tasks_environment_immutable BEFORE UPDATE OF environment_type ON tasks
+  WHEN OLD.environment_type IS NOT NULL AND NEW.environment_type IS NOT OLD.environment_type BEGIN
+    SELECT RAISE(ABORT, 'Task environment type is immutable');
+  END;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

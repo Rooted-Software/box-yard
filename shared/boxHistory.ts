@@ -69,6 +69,8 @@ export interface BoxEvent {
   freedBytes: number | null
   /** One line on what happened. */
   detail: string | null
+  /** The provider the box was on ("upstash", "agent37", "local"…); null on events from before it was recorded. */
+  provider: string | null
 }
 
 export interface BoxEventFilter {

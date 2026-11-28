@@ -7,6 +7,9 @@ import type { WorkerSize } from "./types.js"
 export const BOX_POOLS = ["upstash", "agent37"] as const
 export type BoxPool = (typeof BOX_POOLS)[number]
 export const BOX_POOL_LABEL: Record<BoxPool, string> = { upstash: "Upstash Box", agent37: "Agent37" }
+export const isBoxPool = (v: unknown): v is BoxPool => v === "upstash" || v === "agent37"
+/** A box's cloud from its provider's name ("upstash", "agent37"), or null for folders and other runners. */
+export const boxCloudOf = (provider: string | null | undefined): BoxPool | null => (isBoxPool(provider) ? provider : null)
 
 /** Box ids of Agent37 instances: `agent37-<instance id>` (Agent37's ids are 10 lowercase letters and digits). */
 export const AGENT37_BOX_PREFIX = "agent37-"

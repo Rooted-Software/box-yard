@@ -1,4 +1,5 @@
 import { AGENT37_API } from "./agent37/api.js"
+import type { BoxPool } from "../shared/agent37.js"
 import { OPENCODE_INSTALL, OPENCODE_LOGIN_HELP, parseOpenCodeAuth } from "./opencode.js"
 // GET /api/setup and the Test buttons behind POST /api/setup/test/:key: what's missing before Box Yard can do real
 // work, and a cheap live check of each credential. Nothing here returns or logs a secret: every message goes
@@ -177,7 +178,7 @@ export class Setup {
    * any cloud when there's no project to ask. A Cursor task (`cli` "cursor", `claudeKey` then says whether it has a
    * Cursor API key) needs one everywhere but this computer and SSH machines, which can have their own cursor-agent login.
    */
-  async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude", gpuCloud?: GpuProvider): Promise<string | null> {
+  async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude", gpuCloud?: GpuProvider, boxCloud?: BoxPool): Promise<string | null> {
     const { c, credentials } = this.d
     // SSH machines say for themselves whether they have the task's CLI and a login (placement waits for one with the reason).
     if (runner === "ssh") {
@@ -199,9 +200,9 @@ export class Setup {
       return cursorKey ? null : noCursorKey
     }
     if (runner === "box") {
-      if (this.onAgent37()) {
+      if (boxCloud === "agent37" || (!boxCloud && this.onAgent37())) {
         if (creds.agent37ApiKey.state !== "set") return "Agent37 boxes aren't set up: add an Agent37 API key in Settings › Box providers › Agent37 boxes"
-      } else if (c.boxProvider !== "local" && creds.upstashBoxApiKey.state !== "set") return "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Box providers › Upstash boxes"
+      } else if ((boxCloud === "upstash" || c.boxProvider !== "local") && creds.upstashBoxApiKey.state !== "set") return "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Box providers › Upstash boxes"
       // BOX_PROVIDER=local's "boxes" are folders on this computer, where its own cursor-agent login works.
       return cursorKey || c.boxProvider === "local" ? null : noCursorKey
     }

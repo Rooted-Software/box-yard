@@ -1,3 +1,4 @@
+import type { BoxPool } from "../../shared/agent37.js"
 import { Box, type BoxData, type Snapshot } from "@upstash/box"
 import fs from "node:fs"
 import type { Config } from "../config.js"
@@ -74,6 +75,11 @@ export class UpstashProvider implements BoxProvider {
       this.cacheFor = key
     }
     return this.cache
+  }
+
+  /** On its own (BOX_PROVIDER), it makes one kind of pool box. */
+  pools(): BoxPool[] {
+    return ["upstash"]
   }
 
   root() {

@@ -1,3 +1,4 @@
+import type { BoxPool } from "../../shared/agent37.js"
 import fs from "node:fs"
 import { randomUUID } from "node:crypto"
 import { StringDecoder } from "node:string_decoder"
@@ -92,6 +93,11 @@ export class Agent37Provider implements BoxProvider {
 
   private get apiKey() {
     return this.creds.get("agent37ApiKey")
+  }
+
+  /** On its own (BOX_PROVIDER), it makes one kind of pool box. */
+  pools(): BoxPool[] {
+    return ["agent37"]
   }
 
   root() {

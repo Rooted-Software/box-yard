@@ -1,6 +1,5 @@
-import type { WorkerSize } from "../../shared/types.js"
-import { isAgent37Box } from "../../shared/agent37.js"
-import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
+import { BOX_POOL_LABEL, isAgent37Box, type BoxPool } from "../../shared/agent37.js"
+import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, CreateBoxOptions, ExecResult } from "./types.js"
 
 /** Local boxes are folders named local-<id> (LocalProvider.create); every other id is an Upstash box. */
 export const isLocalBox = (boxId: string) => boxId.startsWith("local-")
@@ -62,8 +61,15 @@ export class AutoProvider implements BoxProvider {
   root(boxId: string) {
     return this.of(boxId).root(boxId)
   }
-  create(opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }) {
-    return this.current.create(opts)
+  /** New boxes come from `opts.pool` when it's asked for (it needs a key), else from where Settings says. */
+  create(opts: CreateBoxOptions) {
+    if (!opts.pool) return this.current.create(opts)
+    if (!this.pools().includes(opts.pool)) throw new Error(`${BOX_POOL_LABEL[opts.pool]} boxes aren't set up: it has no API key (Settings › Box providers)`)
+    return this.provider(opts.pool).create(opts)
+  }
+  /** The clouds with a key, so a task or project can ask for either. */
+  pools(): BoxPool[] {
+    return [...new Set(this.keyed())].filter((p): p is BoxPool => p === "upstash" || (p === "agent37" && this.agent37 !== null))
   }
   /** A snapshot goes to the provider of its box; snapshot ids start with local- or agent37- like their box ids. */
   snapshot(boxId: string, name: string): Promise<BoxSnapshotInfo> {

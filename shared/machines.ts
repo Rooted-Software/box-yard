@@ -3,6 +3,7 @@
 // Each machine has labels ("laptops", "gpu"); a task or project picks machines by label, and the scheduler takes a
 // free one of those (docs/machines.md).
 
+import type { BoxPool } from "./agent37.js"
 import { parseRunsOn, RUNNERS, type Runner } from "./runner.js"
 import { daytonaSize, isBoxSize } from "./runnerSizes.js"
 import type { BoxSize } from "./types.js"
@@ -166,22 +167,30 @@ export const THIS_COMPUTER = "this_computer"
  * - "local": this computer, unless Settings › Machines › "Local means" names a label (`localLabel`), and then the
  *   SSH machines with that label;
  * - "this_computer": always this computer;
+ * - "agent37" / "agent37:small" (and "upstash" / "upstash:small"): a pool box on that cloud, at least that size;
  * - "gpu:daytona": a GPU pod on that cloud over the project's and Settings' Default GPU cloud, and "gpu:daytona:h100"
  *   one with that GPU (shared/gpuCatalog.ts slugs; the server checks the cloud has it).
  * `runner` null: follow the project. Throws on a combination that makes no sense.
  */
-export function resolveRunsOn(runsOn: string | null | undefined, machineLabel: string | null | undefined, localLabel: string | null): { runner: Runner | null; machineLabel: string | null; viaLocal: boolean; gpu: GpuPick | null; boxSize?: BoxSize } {
+export function resolveRunsOn(runsOn: string | null | undefined, machineLabel: string | null | undefined, localLabel: string | null): { runner: Runner | null; machineLabel: string | null; viaLocal: boolean; gpu: GpuPick | null; boxSize?: BoxSize; boxCloud?: BoxPool } {
   const wanted = machineLabel == null ? null : normalizeLabel(machineLabel)
   if (machineLabel != null && machineLabel.trim() && !wanted) throw new Error(`machine_label "${machineLabel}" has no letters or digits.`)
   const v = runsOn?.trim()
   if (!v) return { runner: wanted ? "ssh" : null, machineLabel: wanted, viaLocal: false, gpu: null }
-  const sized = /^(box|daytona)[:-](.+)$/i.exec(v) ?? /^gpu:(daytona):(cpu-.+|gpu-.+)$/i.exec(v)
+  // "agent37" / "upstash": a pool box on that cloud, over the project's and Settings' (docs/agent37.md).
+  const cloud = /^(agent37|upstash)$/i.exec(v)
+  if (cloud) {
+    if (wanted) throw new Error(`machine_label goes with SSH machines, not runs_on "${v}".`)
+    return { runner: "box", machineLabel: null, viaLocal: false, gpu: null, boxCloud: cloud[1]!.toLowerCase() as BoxPool }
+  }
+  const sized = /^(box|daytona|agent37|upstash)[:-](.+)$/i.exec(v) ?? /^gpu:(daytona):(cpu-.+|gpu-.+)$/i.exec(v)
   if (sized) {
     if (wanted) throw new Error(`machine_label goes with SSH machines, not runs_on "${v}".`)
     const key = sized[2]!.toLowerCase()
-    if (sized[1]!.toLowerCase() === "box") {
+    const kind = sized[1]!.toLowerCase()
+    if (kind === "box" || kind === "agent37" || kind === "upstash") {
       if (!isBoxSize(key)) throw new Error(`Unknown box size "${key}": use small, medium or large.`)
-      return { runner: "box", machineLabel: null, viaLocal: false, gpu: null, boxSize: key }
+      return { runner: "box", machineLabel: null, viaLocal: false, gpu: null, boxSize: key, ...(kind === "box" ? {} : { boxCloud: kind as BoxPool }) }
     }
     const size = daytonaSize(key)
     if (!size) throw new Error(`Unknown Daytona size "${key}": use a size from the @daytona list.`)

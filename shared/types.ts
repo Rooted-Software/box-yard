@@ -67,6 +67,11 @@ export interface Project {
   notesMaxTokens: number | null
   /** Size for new boxes made for this project; null uses Settings → Worker size. */
   boxSize: BoxSize | null
+  /**
+   * The cloud its pool boxes come from (docs/agent37.md): its tasks land only on that cloud's boxes. null follows
+   * Settings › Box providers (and moves no task).
+   */
+  boxCloud?: BoxPool | null
   /** Box mirrors of its repo are partial clones (blob:none); null uses Settings → Partial clone mirrors. */
   partialClone: boolean | null
   /** Push each task's branch and uncommitted work at the end of every turn; null uses Settings → Push at turn end. */
@@ -291,6 +296,8 @@ export interface Task {
   runsOn: Runner | null
   /** Minimum Upstash size for this task; omitted follows the project. */
   boxSize?: BoxSize | null
+  /** With runsOn "box": the cloud its boxes come from ("agent37", "upstash"), over its project's; null follows the project. */
+  boxCloud?: BoxPool | null
   /** With its own runs_on "ssh": the SSH machines it runs on, by label or name (shared/machines.ts); null: any. */
   machineLabel: string | null
   /** With its own runs_on "gpu": its own cloud and GPU ("@gpu:daytona:h100"), over its project's; null follows the project. */

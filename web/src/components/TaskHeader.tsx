@@ -672,7 +672,7 @@ function TaskMenu({
                   <dl className="mb-3 grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-x-2">
                     <Detail label="Runs on">
                       <span className={cx("min-w-0 wrap-anywhere", task.runsOn === "local" ? "text-amber-200" : "text-zinc-300")} data-testid="task-runs-on">
-                        {task.runsOn === "gpu" && task.gpu ? gpuPickLabel(task.gpu.provider, task.gpu.type) : RUNNER_LABEL[task.runsOn]}
+                        {task.runsOn === "gpu" && task.gpu ? gpuPickLabel(task.gpu.provider, task.gpu.type) : task.runsOn === "box" && task.boxCloud ? `${task.boxCloud === "agent37" ? "Agent37" : "Upstash"} box` : RUNNER_LABEL[task.runsOn]}
                         {task.runsOn === "box" && task.boxSize ? ` · ${task.boxSize} or larger` : task.runsOn === "gpu" && task.gpu?.size ? ` · ${daytonaSize(task.gpu.size)?.label ?? task.gpu.size}` : task.runsOn === "ssh" && task.machineLabel ? ` · ${task.machineLabel}` : ""} · this task only
                       </span>
                     </Detail>

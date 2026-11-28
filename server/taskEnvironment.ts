@@ -108,10 +108,10 @@ export class TaskEnvironment {
     return type
   }
 
-  runner(type: EnvironmentType, runner: Runner, gpu: GpuProvider): void {
+  runner(type: EnvironmentType, runner: Runner, gpu: GpuProvider, boxCloud: "upstash" | "agent37" | null = null): void {
     // A box selection may reuse an existing Upstash or Agent37 box even if AutoProvider currently creates elsewhere.
-    // Pool growth and every actual destination are checked separately.
-    const target = runner === "box" ? (type === "upstash" || type === "agent37" ? type : environmentType(this.provider.name)) : runner === "gpu" ? gpu : runner
+    // Pool growth and every actual destination are checked separately. An explicit cloud ("agent37") must be the lineage's.
+    const target = runner === "box" ? (boxCloud ?? (type === "upstash" || type === "agent37" ? type : environmentType(this.provider.name))) : runner === "gpu" ? gpu : runner
     if (target !== type) this.reject(`descendants of ${type} tasks must remain in ${type}; requested ${target ?? "unknown"} placement is forbidden.`)
   }
 

@@ -2,6 +2,7 @@
 // let it go (resting, archived), and where its next turn goes. Cards, the task header and the MCP task tools all
 // word it with the functions here, so "Upstash · pure-lobster · small" reads the same everywhere.
 import type { BoxSize } from "./types.js"
+import type { BoxPool } from "./agent37.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, type Runner } from "./runner.js"
 import { gpuBoxIndex, isGpuBox } from "./runpod.js"
 import { GPU_PROVIDER_LABEL, gpuBoxProvider } from "./gpu.js"
@@ -66,6 +67,9 @@ export interface TaskPlacement {
   projectRunner: Runner
   /** SSH machines: the label (or machine name) its next turn picks a machine by; null: any machine. */
   machineLabel?: string | null
+  /** Pool boxes: the cloud its boxes must come from (its own runs_on "agent37", else its project's); unset: any. */
+  boxCloud?: BoxPool | null
+  cloudChosenBy?: RunnerSource
 }
 
 /** The kind of place a box id is. Worker boxes are everything that isn't one of the runners' virtual boxes. */
@@ -77,6 +81,10 @@ export const RUNNER_PLACE: Record<Runner, PlaceKind> = { local: "local", box: "b
 
 /** The provider's name, as the chip leads with it. */
 export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", box: "Upstash", gpu: "RunPod", docker: "Docker", ssh: "SSH" }
+
+/** A pool box's cloud as the chip leads with it, and in a sentence. */
+const CLOUD_NAME: Record<BoxPool, string> = { upstash: "Upstash", agent37: "Agent37" }
+const CLOUD_PHRASE: Record<BoxPool, string> = { upstash: "an Upstash box", agent37: "an Agent37 box" }
 
 /** "Upstash" for Upstash boxes, "Agent37" for Agent37 instances, "Local box" for mock mode's folder boxes. */
 const boxProviderName = (p: Place) => (p.provider && p.provider !== "upstash" ? (p.provider === "local" ? "Local box" : p.provider === "agent37" ? "Agent37" : p.provider) : PLACE_NAME.box)
@@ -172,13 +180,16 @@ const HEADING_OUT = new Set(["queued", "starting"])
 export function placementView(t: PlacementTask, projectRunner?: Runner): PlacementView {
   const p = t.placement ?? fallback(t, projectRunner)
   const pinned = p.chosenBy === "task" && p.runner !== p.projectRunner
-  // SSH machines say which: 'SSH machines labelled "laptops"'.
-  const phrase = p.runner === "ssh" ? labelPhrase(p.machineLabel ?? null) : RUNNER_PHRASE[p.runner]
-  const setting = `${p.chosenBy === "task" ? "This task's" : "Project's"} Runs on: ${phrase}`
+  // SSH machines say which: 'SSH machines labelled "laptops"'; a pool box bound to one cloud says that: "an Agent37 box".
+  const cloud = p.runner === "box" ? (p.boxCloud ?? null) : null
+  const phrase = p.runner === "ssh" ? labelPhrase(p.machineLabel ?? null) : cloud ? CLOUD_PHRASE[cloud] : RUNNER_PHRASE[p.runner]
+  const byTask = p.chosenBy === "task" || (cloud !== null && p.cloudChosenBy === "task")
+  const setting = `${byTask ? "This task's" : "Project's"} Runs on: ${phrase}`
   const base = { pinned, chosenBy: p.chosenBy, setting }
   const wanted = RUNNER_PLACE[p.runner]
   if (p.now) {
-    const moving = p.now.kind !== wanted
+    const otherCloud = Boolean(cloud && p.now.kind === "box" && (p.now.provider === "upstash" || p.now.provider === "agent37") && p.now.provider !== cloud)
+    const moving = p.now.kind !== wanted || otherCloud
     return {
       ...base,
       state: "here",
@@ -204,7 +215,7 @@ export function placementView(t: PlacementTask, projectRunner?: Runner): Placeme
       place: p.last,
     }
   }
-  const name = p.runner === "ssh" && p.machineLabel ? `${PLACE_NAME.ssh} · ${p.machineLabel}` : PLACE_NAME[wanted]
+  const name = p.runner === "ssh" && p.machineLabel ? `${PLACE_NAME.ssh} · ${p.machineLabel}` : cloud ? CLOUD_NAME[cloud] : PLACE_NAME[wanted]
   const archived = Boolean(t.lastArchivedAt) && !HEADING_OUT.has(t.status)
   return {
     ...base,

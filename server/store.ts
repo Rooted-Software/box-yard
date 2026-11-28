@@ -1,3 +1,4 @@
+import { isBoxPool, type BoxPool } from "../shared/agent37.js"
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
 import type { ArchiveKind } from "./archive.js"
@@ -229,6 +230,8 @@ export interface TaskRow {
   gpu_type?: string | null
   gpu_size?: string | null
   box_size?: string | null
+  /** With its own runs_on 'box': the cloud its boxes come from ('upstash' or 'agent37'); null: its project's, then Settings'. */
+  box_cloud?: string | null
   /** The CLI its agent runs on, 'claude' or 'codex'; null on rows from before Codex: Claude Code. */
   agent_cli?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
@@ -434,6 +437,8 @@ interface ProjectRow {
   base_branch: string
   env_json: string
   box_size: string | null
+  /** The cloud its pool boxes come from ('upstash' or 'agent37'); null: Settings › Box providers. */
+  box_cloud?: string | null
   partial_clone: number | null
   push_at_turn_end: number | null
   dep_cache?: number | null
@@ -664,6 +669,7 @@ type TaskPatch = Partial<{
   gpuType: string | null
   gpuSize: string | null
   boxSize: BoxSize | null
+  boxCloud: BoxPool | null
   prHeadSha: string | null
   prLabels: string[]
   prNewComments: number | null
@@ -731,6 +737,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   gpuType: "gpu_type",
   gpuSize: "gpu_size",
   boxSize: "box_size",
+  boxCloud: "box_cloud",
   prHeadSha: "pr_head_sha",
   prLabels: "pr_labels_json",
   prNewComments: "pr_new_comments",
@@ -886,6 +893,8 @@ interface TaskLookups {
   /** Its card line when it has no summary (shared/activity.ts). */
   activity(taskId: string): string | null
   runner(projectId: string): Runner
+  /** Its project's box cloud (Project.boxCloud), for its placement. */
+  boxCloud(projectId: string): BoxPool | null
   /** Its latest turn's model and effort (Task.turnModel); null before its first turn. */
   lastTurn(taskId: string): LastTurn | null
 }
@@ -1087,6 +1096,7 @@ export class Store {
       notesMaxCount: row.notes_max_count ?? null,
       notesMaxTokens: row.notes_max_tokens ?? null,
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
+      boxCloud: boxPoolOf(row.box_cloud),
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
@@ -1203,6 +1213,8 @@ export class Store {
     baseBranch?: string
     env?: Record<string, string>
     boxSize?: BoxSize | null
+    /** The cloud its pool boxes come from; null follows Settings › Box providers. */
+    boxCloud?: BoxPool | null
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
     depCache?: boolean | null
@@ -1244,6 +1256,7 @@ export class Store {
         now,
       )
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
+    if (input.boxCloud) this.db.prepare("UPDATE projects SET box_cloud = ? WHERE id = ?").run(input.boxCloud, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
     if (typeof input.depCache === "boolean") this.db.prepare("UPDATE projects SET dep_cache = ? WHERE id = ?").run(input.depCache ? 1 : 0, id)
@@ -1274,6 +1287,8 @@ export class Store {
       removeEnv?: string[]
       /** null clears it (Settings → Worker size applies). */
       boxSize?: BoxSize | null
+      /** The cloud its pool boxes come from; null follows Settings › Box providers. */
+      boxCloud?: BoxPool | null
       /** null clears it (Settings → Partial clone mirrors applies). */
       partialClone?: boolean | null
       /** null clears it (Settings → Push at turn end applies). */
@@ -1340,6 +1355,7 @@ export class Store {
         Date.now(),
         id,
       )
+    if (patch.boxCloud !== undefined) this.db.prepare("UPDATE projects SET box_cloud = ? WHERE id = ?").run(patch.boxCloud, id)
     this.setRunner(id, patch.runner, patch.machineLabel)
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
@@ -1592,6 +1608,7 @@ export class Store {
     )
     let activity: ReturnType<DB["prepare"]> | undefined
     const runners = new Map<string, Runner>()
+    const clouds = new Map<string, BoxPool | null>()
     return {
       lastTurn: (id) => lastTurn.get(id) ?? null,
       pending: (id) => pending.get(id) ?? NO_PENDING,
@@ -1600,6 +1617,10 @@ export class Store {
       runner: (projectId) => {
         if (!runners.has(projectId)) runners.set(projectId, this.projectRunner(projectId))
         return runners.get(projectId)!
+      },
+      boxCloud: (projectId) => {
+        if (!clouds.has(projectId)) clouds.set(projectId, this.projectBoxCloud(projectId))
+        return clouds.get(projectId)!
       },
     }
   }
@@ -1653,9 +1674,10 @@ export class Store {
       routingReason: row.routing_reason ?? null,
       runsOn: taskRunsOn(row),
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
+      boxCloud: boxPoolOf(row.box_cloud),
       machineLabel: row.machine_label || null,
       gpu: taskGpuPick(row),
-      placement: this.taskPlacement(row, lookups.runner(row.project_id)),
+      placement: this.taskPlacement(row, lookups.runner(row.project_id), lookups.boxCloud),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
       icon: isTaskIcon(row.icon) ? row.icon : null,
@@ -1717,7 +1739,7 @@ export class Store {
   }
 
   /** Where a task runs now, where it last ran, and where its next turn goes (shared/placement.ts). */
-  taskPlacement(row: TaskRow, projectRunner = this.projectRunner(row.project_id)): TaskPlacement {
+  taskPlacement(row: TaskRow, projectRunner = this.projectRunner(row.project_id), projectCloud: (projectId: string) => BoxPool | null = (id) => this.projectBoxCloud(id)): TaskPlacement {
     const own = taskRunsOn(row)
     return {
       now: row.box_id ? { ...this.placeOf(row.box_id), ...(isBoxPick(row.placed_how) ? { how: row.placed_how } : {}) } : null,
@@ -1726,7 +1748,13 @@ export class Store {
       chosenBy: own ? "task" : "project",
       projectRunner,
       ...((own ?? projectRunner) === "ssh" ? { machineLabel: this.taskMachineLabel(row) } : {}),
+      ...((own ?? projectRunner) === "box" ? boxCloudPlacement(row, projectCloud) : {}),
     }
+  }
+
+  /** A project's box cloud (Project.boxCloud). `SELECT *`, so a database from before the column reads null. */
+  projectBoxCloud(id: string): BoxPool | null {
+    return boxPoolOf((this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined)?.box_cloud)
   }
 
   /**
@@ -1886,6 +1914,8 @@ export class Store {
     /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
     runsOn?: Runner | null
     boxSize?: BoxSize | null
+    /** With runsOn "box": the cloud its boxes come from (`agent37` or `upstash` runs_on). */
+    boxCloud?: BoxPool | null
     /** With runsOn "ssh": the SSH machines it runs on, by label or name (TaskRow.machine_label). */
     machineLabel?: string | null
     /** With runsOn "gpu": its own cloud and GPU (TaskRow.gpu_provider, gpu_type). */
@@ -1936,6 +1966,7 @@ export class Store {
     if (input.runsOn === "gpu" && input.gpu) this.db.prepare("UPDATE tasks SET gpu_provider = ?, gpu_type = ? WHERE id = ?").run(input.gpu.provider, input.gpu.type, id)
     if (input.runsOn === "gpu" && input.gpu?.size) this.db.prepare("UPDATE tasks SET gpu_size = ? WHERE id = ?").run(input.gpu.size, id)
     if (input.runsOn === "box" && input.boxSize) this.db.prepare("UPDATE tasks SET box_size = ? WHERE id = ?").run(input.boxSize, id)
+    if (input.runsOn === "box" && input.boxCloud) this.db.prepare("UPDATE tasks SET box_cloud = ? WHERE id = ?").run(input.boxCloud, id)
     if (input.agentCli) this.db.prepare("UPDATE tasks SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
     if (input.icon) this.setTaskIcon(id, input.icon)
     if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
@@ -4878,4 +4909,17 @@ function timingFromRow(r: TurnTimingRow): TurnTiming {
     loginId: r.login_id ?? null,
     steps: parse(r.steps_json, []),
   } as TurnTiming
+}
+
+/** A pool-box task's own cloud ("agent37"), else its project's, for its placement chip; nothing when neither names one. */
+function boxCloudPlacement(row: TaskRow, projectCloud: (projectId: string) => BoxPool | null): { boxCloud: BoxPool; cloudChosenBy: "task" | "project" } | Record<string, never> {
+  const own = boxPoolOf(row.box_cloud)
+  if (own) return { boxCloud: own, cloudChosenBy: "task" }
+  const project = projectCloud(row.project_id)
+  return project ? { boxCloud: project, cloudChosenBy: "project" } : {}
+}
+
+/** A stored cloud ('upstash' or 'agent37'), or null for anything else. */
+function boxPoolOf(v: string | null | undefined): BoxPool | null {
+  return isBoxPool(v) ? v : null
 }

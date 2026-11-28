@@ -26,9 +26,15 @@ Projects keep their **Runs on: Upstash box** setting, and the name stays for now
 
 `BOX_PROVIDER=upstash` and `BOX_PROVIDER=local` still pin boxes to Upstash or this machine, and then the Settings choice does nothing. With `UPSTASH_BOX_API_KEY` in the environment and no `BOX_PROVIDER`, new boxes stay on Upstash until Settings picks Agent37 and Agent37 has a key.
 
-### One project only
+## One task or one project on Agent37
 
-This isn't supported yet. The pool's cloud is one choice for the whole yard, because placement shares pool boxes between projects. A project that must stay on one cloud can use another runner instead: Docker, a GPU cloud, or SSH machines.
+You don't have to move the whole yard. Agent37 needs its key (step 3 above); after that, each task or project can pick its own cloud:
+
+- **One task:** pass `runs_on: "agent37"` to `create_task`, `create_tasks` or `send_to_task`, or `"agent37:small"`, `"agent37:medium"` or `"agent37:large"` for a minimum size. `"upstash"` and `"upstash:<size>"` do the same for Upstash. In a chat, type `@agent37` or `@agent37:small` (`@upstash` too); these entries appear once Agent37 has a key. The choice sticks for the task's later turns, like `box:<size>`. Plain `"box"` follows the project's cloud.
+- **One project:** set Project › Settings › Boxes › **Box cloud**, or `update_project` with `box_cloud: "agent37"` (or `"upstash"`; `null` follows Settings). A task's own pick wins over its project's.
+- **What's kept apart:** a task bound to a cloud lands only on that cloud's boxes, and when it needs a new box, it's made there. It never takes an idle box of the other cloud, so a project's boxes stay on its cloud. Without a key for its cloud, the task waits and says why; it never runs elsewhere. A subtask stays on its parent's cloud.
+- **Moving between clouds:** a resting task whose cloud changes moves before its next turn, never during one. It goes through the same path as any move between boxes: its workspace comes back from the archive taken after its last turn, so a task with unarchived work stays where it is (its log says why) until that archive exists.
+- **Where it ran:** the task's placement says so ("Agent37 · agent37-ab12cd34ef · small"), and every box history event records its box's provider (`provider` in `box_history`). `list_projects` shows each project's `boxCloud`.
 
 ## How it works
 
@@ -72,6 +78,10 @@ This isn't supported yet. The pool's cloud is one choice for the whole yard, bec
 - The client (`server/agent37/api.ts`) only calls instance-scoped endpoints: create, list, read, edit, start, stop, resize, fork and delete instances, sign one port's URL, run commands in one, and read `GET /v1/usage`. It never calls the workspace-wide ones: keys, members, billing top-ups, templates, domains, webhooks or signup.
 - The key stays on the server. It goes only to `api.agent37.com` (as `Authorization: Bearer`) and `sandbox.agent37.app` (as `X-Agent37-Key`), never into an instance's env, a command, a URL or an error message. The UI field is a `SecretInput`, and the settings API reports only whether a key is set. Local agents run as the server's OS user, so this isn't isolation from them.
 - An Agent37 key controls every instance in its workspace. Use a workspace of its own for Box Yard if other things run there.
+
+## The environment_type fix
+
+Box Yard records each task's physical environment (`tasks.environment_type`) on its first turn. Its database CHECK didn't include `agent37`, so in the first release a task's first turn on an Agent37 box failed with "CHECK constraint failed: environment_type IN (…)". The migration with the per-task cloud choice fixes it. It copies the column to a new one that allows `agent37` and keeps every stored value and the rule that the value never changes.
 
 ## Checked against Agent37
 

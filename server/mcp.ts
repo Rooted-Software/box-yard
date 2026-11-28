@@ -1,3 +1,4 @@
+import { BOX_POOLS, type BoxPool } from "../shared/agent37.js"
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import type { Request, Response } from "express"
@@ -199,12 +200,12 @@ export const MAX_TASK_BATCH = 100
  * runs_on's short forms (shared/machines.ts resolveRunsOn): SSH machines with a label ("label:gpu"), and one GPU cloud,
  * or one GPU on it ("gpu:daytona", "gpu:runpod:rtx-a5000").
  */
-const RUNS_ON_LABEL = /^(?:(?:label|ssh):[A-Za-z0-9 ._-]{1,40}|(?:box|daytona)[:-][A-Za-z0-9._-]{1,40}|daytona|gpu:[a-z]{1,20}(?::[A-Za-z0-9._-]{1,40})?)$/i
-const runsOnValue = z.union([z.enum([...RUNNERS, THIS_COMPUTER]), z.string().regex(RUNS_ON_LABEL, 'runs_on is a runner, this_computer, "box:<size>", "daytona:<size>", "label:<label>" or "gpu:<cloud>[:<gpu>]"')])
+const RUNS_ON_LABEL = /^(?:(?:label|ssh):[A-Za-z0-9 ._-]{1,40}|(?:box|daytona|agent37|upstash)[:-][A-Za-z0-9._-]{1,40}|daytona|agent37|upstash|gpu:[a-z]{1,20}(?::[A-Za-z0-9._-]{1,40})?)$/i
+const runsOnValue = z.union([z.enum([...RUNNERS, THIS_COMPUTER]), z.string().regex(RUNS_ON_LABEL, 'runs_on is a runner, this_computer, "box:<size>", "agent37[:<size>]", "upstash[:<size>]", "daytona:<size>", "label:<label>" or "gpu:<cloud>[:<gpu>]"')])
 type RunsOn = z.infer<typeof runsOnValue>
 const runsOnBase = runsOnValue.optional()
 const runsOnSchema = runsOnBase.describe(
-  'Where it runs, for later turns too: "local", "this_computer", "box" or "box:<size>" (small, medium, large; hyphen alias accepted), "daytona:<size>" (e.g. cpu-large or gpu-h100), "gpu" (Settings\' Default GPU cloud), "gpu:<cloud>" or "gpu:<cloud>:<gpu>" (e.g. "gpu:daytona:h100"), "docker", "ssh" or "label:<label>"; omit it to follow the project (Task options)',
+  'Where it runs, for later turns too: "local", "this_computer", "box" or "box:<size>" (a pool box on its project\'s cloud, Upstash unless the project or Settings picks Agent37; sizes small, medium, large; hyphen alias accepted), "agent37" or "agent37:<size>" (a pool box on Agent37: use it when Cody says to run it on Agent37), "upstash" or "upstash:<size>" (a pool box on Upstash, when Cody says Upstash), "daytona:<size>" (e.g. cpu-large or gpu-h100), "gpu" (Settings\' Default GPU cloud), "gpu:<cloud>" or "gpu:<cloud>:<gpu>" (e.g. "gpu:daytona:h100"), "docker", "ssh" or "label:<label>"; omit it to follow the project (Task options)',
 )
 const machineLabelBase = z.string().max(MACHINE_LIMITS.labelLength).optional()
 const machineLabelSchema = machineLabelBase.describe('An SSH machine label or name, e.g. "gpu" (list_machines lists them); alone it means runs_on "ssh" (Task options)')
@@ -309,6 +310,7 @@ export function settle(tasks: Pick<TaskManager, "onTaskUpdate">, read: () => { i
 /** The box settings create_project and update_project take. */
 interface BoxSettingsArgs {
   box_size?: BoxSize | null
+  box_cloud?: BoxPool | null
   agents_per_box?: number | null
   whole_machine?: boolean
   tasks_per_box?: number | null
@@ -705,6 +707,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   })
   /** A project's own box settings, for create_project and update_project (null clears one: the global applies). */
   const boxSettingsInput = {
+    box_cloud: z
+      .enum(BOX_POOLS)
+      .nullable()
+      .optional()
+      .describe(
+        'The cloud its pool boxes (Runs on: Upstash box) come from: "agent37" (Agent37 instances; needs an Agent37 API key) or "upstash" (Upstash Box). Its tasks land only on that cloud\'s boxes, and a resting task moves over once its workspace is archived. null: Settings › Box providers (New pool boxes come from). Set it when Cody says to run a project on Agent37 or on Upstash; for one task use runs_on "agent37" or "upstash" instead.',
+      ),
     box_size: z
       .enum(BOX_SIZES)
       .nullable()
@@ -797,6 +806,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   }
   const boxSettingsPatch = (a: BoxSettingsArgs) => ({
     boxSize: a.box_size,
+    boxCloud: a.box_cloud,
     agentsPerBox: a.agents_per_box,
     wholeMachine: a.whole_machine,
     tasksPerBox: a.tasks_per_box,
@@ -1006,6 +1016,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (!a.project && !scopeId) return fail("Name the project to update.")
         const id = a.project ? project(a.project).id : ownProject().id
         const box = boxSettingsPatch(a)
+        // A project on Agent37 (or Upstash) needs that cloud's key: say so now, not when its tasks wait.
+        if (box.boxCloud) await tasks.requireRunner("box", id, {}, { agentCli: a.agent, boxCloud: box.boxCloud })
         if (a.machine_label !== undefined && !scopeId) {
           const current = store.getProject(id)!
           if (current.runner !== "ssh") return fail(`${current.name} doesn't run on SSH machines (its Runs on is ${current.runner ?? "box"}). ${owner("Cody")} picks Runs on in the project's settings; for one task, pass runs_on "label:<label>" to create_task.`)
@@ -1382,6 +1394,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         machineLabel: where.machineLabel,
         gpu: where.gpu,
         boxSize: where.boxSize,
+        boxCloud: where.boxCloud,
         agentCli: cli.agent ?? null,
         icon: a.icon ?? null,
         priority: a.priority ?? null,
@@ -1539,6 +1552,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             machineLabel: places[i]!.machineLabel,
             gpu: places[i]!.gpu,
             boxSize: places[i]!.boxSize,
+            boxCloud: places[i]!.boxCloud,
             agentCli: cli.agent ?? null,
             icon: item.icon ?? null,
             priority: item.priority ?? a.priority ?? null,
@@ -1589,7 +1603,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         task: z.string(),
         message: z.string().min(1),
         attachments: attachmentsSchema,
-        runs_on: runsOnBase.describe('Move it ("local", "this_computer", "box", "box:<size>", "daytona:<size>", "gpu", "gpu:<cloud>", "gpu:<cloud>:<gpu>", "docker", "ssh" or "label:<label>") from its next turn on; omit it to leave it where it runs (Task options)'),
+        runs_on: runsOnBase.describe('Move it ("local", "this_computer", "box", "box:<size>", "agent37" or "agent37:<size>" for Agent37, "upstash" or "upstash:<size>" for Upstash, "daytona:<size>", "gpu", "gpu:<cloud>", "gpu:<cloud>:<gpu>", "docker", "ssh" or "label:<label>") from its next turn on; omit it to leave it where it runs (Task options)'),
         machine_label: machineLabelBase.describe("Move it to a free SSH machine with this label or name from its next turn on (Task options)"),
         steer: z.boolean().optional().describe(STEER_DESCRIPTION),
         interrupt: z.boolean().optional().describe(INTERRUPT_DESCRIPTION),
@@ -1610,7 +1624,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             }
           : {}
       await tasks.requireRunner(where.runner, before.projectId, store.taskEnv(before.id), { agentCli: before.agentCli, machineLabel: where.machineLabel, gpu: where.gpu })
-      if (where.runner) tasks.setRunsOn(before.id, where.runner, where.machineLabel, where.gpu, where.boxSize)
+      if (where.runner) tasks.setRunsOn(before.id, where.runner, where.machineLabel, where.gpu, where.boxSize, where.boxCloud)
       const moved = overrides(before.projectId, turnPick() ? {} : { runsOn: askedRunsOn(a.runs_on, a.machine_label), runner: where.runner, machineLabel: where.machineLabel })
       // Before the message: queuing it runs the scheduler, which must already see the new priority.
       if (a.priority) tasks.setTaskPriority(before.id, a.priority, prioritySetter)
@@ -3437,6 +3451,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           ago: ago(e.at),
           box: e.boxId,
           ...(e.boxName && e.boxName !== e.boxId ? { name: e.boxName } : {}),
+          provider: e.provider ?? undefined,
           event: e.type,
           by: boxActorLabel(e, projectName, ownerName),
           reason: e.reason ?? undefined,

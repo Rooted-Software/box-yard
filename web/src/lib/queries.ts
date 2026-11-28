@@ -1,3 +1,4 @@
+import type { BoxPool } from "../../../shared/agent37"
 import { useCallback, useEffect, useMemo, useRef } from "react"
 import { keepPreviousData, replaceEqualDeep, useMutation, useQuery, useQueryClient, type QueryClient, type QueryFunctionContext } from "@tanstack/react-query"
 import { ApiError, api, clientId } from "./api"
@@ -1083,6 +1084,8 @@ export function useUpdateProject() {
       env?: Record<string, string>
       removeEnv?: string[]
       boxSize?: BoxSize | null
+      /** The cloud its pool boxes come from; null follows Settings › Box providers. */
+      boxCloud?: BoxPool | null
       partialClone?: boolean | null
       notesMaxCount?: number | null
       notesMaxTokens?: number | null
