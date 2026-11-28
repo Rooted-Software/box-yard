@@ -27,6 +27,7 @@ interface BoxEventRow {
   task_ids_json: string
   freed_bytes: number | null
   detail: string | null
+  provider?: string | null
 }
 
 /** What a caller says about an event; TaskManager.recordBoxEvent fills in the box's name, size, projects and tasks. */
@@ -45,6 +46,8 @@ export interface BoxEventInput {
   taskIds?: string[]
   freedBytes?: number | null
   detail?: string | null
+  /** The provider the box is on ("upstash", "agent37"…); recordBoxEvent fills it in from the box. */
+  provider?: string | null
   at?: number
 }
 
@@ -75,6 +78,7 @@ const fromRow = (r: BoxEventRow): BoxEvent => ({
   taskIds: parseList<string>(r.task_ids_json),
   freedBytes: r.freed_bytes,
   detail: r.detail,
+  provider: r.provider ?? null,
 })
 
 /**
@@ -88,8 +92,8 @@ export class BoxHistory {
     const at = input.at ?? Date.now()
     const res = this.db
       .prepare(
-        `INSERT INTO box_events (at, box_id, box_name, type, actor, actor_project_id, reason, size, from_size, to_size, related_box_id, resize_id, projects_json, task_ids_json, freed_bytes, detail)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO box_events (at, box_id, box_name, type, actor, actor_project_id, reason, size, from_size, to_size, related_box_id, resize_id, projects_json, task_ids_json, freed_bytes, detail, provider)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         at,
@@ -108,6 +112,7 @@ export class BoxHistory {
         JSON.stringify(input.taskIds ?? []),
         input.freedBytes ?? null,
         input.detail?.trim() || null,
+        input.provider ?? null,
       )
     this.prune()
     return this.get(Number(res.lastInsertRowid))!

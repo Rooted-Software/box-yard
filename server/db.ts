@@ -1356,6 +1356,14 @@ export const MIGRATIONS: string[] = [
   );
   CREATE INDEX workspace_sizes_project ON workspace_sizes(project_id, at);
   `,
+  // Agent37 (docs/agent37.md): the cloud a task's or a project's pool boxes come from ('upstash' or 'agent37');
+  // null follows the project, then Settings › Box providers.
+  `
+  ALTER TABLE tasks ADD COLUMN box_cloud TEXT;
+  ALTER TABLE projects ADD COLUMN box_cloud TEXT;
+  -- The provider the box was on ('upstash', 'agent37', 'local', 'docker', …), so the history says where it ran.
+  ALTER TABLE box_events ADD COLUMN provider TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

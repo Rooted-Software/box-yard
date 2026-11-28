@@ -1,3 +1,4 @@
+import { BOX_POOLS, BOX_POOL_LABEL, boxCloudOf, isBoxPool, type BoxPool } from "../shared/agent37.js"
 import { OPENCODE_CREDENTIAL_VARS, OPENCODE_INSTALL, OPENCODE_LOGIN_HELP } from "./opencode.js"
 import fs from "node:fs"
 import os from "node:os"
@@ -11,7 +12,7 @@ import { harnessHandoffKey, type HarnessHandoff, type TaskContinuation } from ".
 import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxRowCost, meterTick, normalizeBoxSize, sourceOf, taskAgentCli, taskGpuPick } from "./store.js"
-import { TaskEnvironment, TaskEnvironmentError, environmentRunner, environmentGpu, subtaskProviderProblem } from "./taskEnvironment.js"
+import { TaskEnvironment, TaskEnvironmentError, environmentRunner, environmentGpu, subtaskProviderProblem, type EnvironmentType } from "./taskEnvironment.js"
 import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
 import { providerOf, q, tasksRootOf } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveKind, type ArchiveOutcome } from "./archive.js"
@@ -479,6 +480,8 @@ export interface NewTask {
   /** Its own runner over the project's "Runs on", for every turn (Task.runsOn). Check it first with requireRunner. */
   runsOn?: Runner | null
   boxSize?: BoxSize | null
+  /** With runsOn "box": the cloud its boxes come from ("agent37" or "upstash"), over its project's (Task.boxCloud). */
+  boxCloud?: BoxPool | null
   /** With runsOn "ssh": the SSH machines it runs on, by label or machine name; null: any machine. */
   machineLabel?: string | null
   /** With runsOn "gpu": its own cloud and GPU ("@gpu:daytona:h100"), over its project's. Check it first with requireRunner. */
@@ -820,7 +823,7 @@ export class TaskManager {
    * Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can.
    * `key` says whether the task's turns would have a key for `cli` (turnCredentials, codexCredentials); undefined: the global one.
    */
-  runnerProblem: ((runner: Runner, key?: boolean, cli?: AgentCli, gpuCloud?: GpuProvider) => Promise<string | null>) | null = null
+  runnerProblem: ((runner: Runner, key?: boolean, cli?: AgentCli, gpuCloud?: GpuProvider, boxCloud?: BoxPool) => Promise<string | null>) | null = null
   /** Agents waiting mid-turn for their Captain's reply, by task. */
   private captainWaits = new Map<string, CaptainWait[]>()
   /** RunPod GPU pods, or null when this install has no GPU runner. */
@@ -1257,7 +1260,7 @@ export class TaskManager {
     runner: Runner | null | undefined,
     projectId?: string,
     taskEnv: Record<string, string> = {},
-    agent?: { agentCli?: AgentCli | null; model?: string | null; machineLabel?: string | null; gpu?: GpuPick | null },
+    agent?: { agentCli?: AgentCli | null; model?: string | null; machineLabel?: string | null; gpu?: GpuPick | null; boxCloud?: BoxPool | null },
   ): Promise<void> {
     if (!runner || !this.runnerProblem) return
     // A GPU no cloud by that name has is a typo, not a wait.
@@ -1275,7 +1278,9 @@ export class TaskManager {
           ? this.cursorCredentials(project.id, taskEnv).from !== null
           : this.turnCredentials(project.id, taskEnv).claudeFrom !== null
     const cloud = runner !== "gpu" ? undefined : (agent?.gpu?.provider ?? (project ? this.gpuCloudOf(project.id) : undefined))
-    const problem = await this.runnerProblem(runner, key, cli, cloud)
+    // A pool box on a named cloud (the task's "agent37", else its project's choice) needs that cloud's key.
+    const boxCloud = runner !== "box" ? undefined : (agent?.boxCloud ?? project?.boxCloud ?? undefined)
+    const problem = await this.runnerProblem(runner, key, cli, cloud, boxCloud)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
     // A label no machine has is a typo, not a wait: busy, offline or switched-off machines with it are waited for.
     const label = agent?.machineLabel ?? null
@@ -1299,7 +1304,7 @@ export class TaskManager {
    * nothing would be lost (toLocal / fromLocal), else it stays where it is and its log says why. Check with
    * requireRunner first.
    */
-  setRunsOn(taskId: string, runner: Runner, machineLabel: string | null = null, gpuPick: GpuPick | null = null, boxSize: BoxSize | null = null) {
+  setRunsOn(taskId: string, runner: Runner, machineLabel: string | null = null, gpuPick: GpuPick | null = null, boxSize: BoxSize | null = null, boxCloud: BoxPool | null = null) {
     const row = this.requireRow(taskId)
     const inherited = this.environment.inherited(row)
     if (inherited) this.environment.runner(inherited, runner, gpuPick?.provider ?? environmentGpu(inherited) ?? this.gpuCloudFor(row))
@@ -1310,10 +1315,15 @@ export class TaskManager {
     const had = taskGpuPick(row)
     const size = runner === "box" ? boxSize : null
     if (size && !isBoxSize(size)) throw new BadRequestError(`Unknown box size "${size}"`)
-    if (row.runs_on === runner && (row.machine_label ?? null) === label && had?.provider === gpu?.provider && (had?.type ?? null) === (gpu?.type ?? null) && had?.size === gpu?.size && (row.box_size ?? null) === size) return
+    const cloud = runner === "box" ? boxCloud : null
+    if (cloud && !isBoxPool(cloud)) throw new BadRequestError(`Unknown box cloud "${cloud}": use upstash or agent37`)
+    // A subtask stays on its lineage's cloud.
+    if (cloud && inherited) this.environment.runner(inherited, runner, this.gpuCloudFor(row), cloud)
+    if (row.runs_on === runner && (row.machine_label ?? null) === label && had?.provider === gpu?.provider && (had?.type ?? null) === (gpu?.type ?? null) && had?.size === gpu?.size && (row.box_size ?? null) === size && (row.box_cloud ?? null) === cloud) return
     this.requireIdentityRunner(row.project_id, runner)
-    this.store.updateTask(row.id, { runsOn: runner, machineLabel: label, gpuProvider: gpu?.provider ?? null, gpuType: gpu?.type ?? null, gpuSize: gpu?.size ?? null, boxSize: size })
-    const where = runner === "ssh" ? labelPhrase(label) : gpu ? `${gpuPickLabel(gpu.provider, gpu.type)}${gpu.size ? ` · ${daytonaSize(gpu.size)!.label}` : ""}` : size ? `an Upstash box, ${size} or larger` : RUNNER_PHRASE[runner]
+    this.store.updateTask(row.id, { runsOn: runner, machineLabel: label, gpuProvider: gpu?.provider ?? null, gpuType: gpu?.type ?? null, gpuSize: gpu?.size ?? null, boxSize: size, boxCloud: cloud })
+    const box = cloud ? `${cloud === "agent37" ? "an Agent37" : "an Upstash"} box` : "a pool box"
+    const where = runner === "ssh" ? labelPhrase(label) : gpu ? `${gpuPickLabel(gpu.provider, gpu.type)}${gpu.size ? ` · ${daytonaSize(gpu.size)!.label}` : ""}` : size ? `${box}, ${size} or larger` : cloud ? box : RUNNER_PHRASE[runner]
     this.addEvent(row.id, `Runs on ${where} from its next turn on (this task only, over its project's "Runs on").`)
     this.emitTask(row.id)
   }
@@ -1340,7 +1350,7 @@ export class TaskManager {
       if (!type) return input
       const runsOn = input.runsOn ?? environmentRunner(type)
       const gpu = runsOn === "gpu" ? input.gpu ?? { provider: environmentGpu(type)!, type: null } : null
-      this.environment.runner(type, runsOn, gpu?.provider ?? this.gpuCloudOf(input.projectId))
+      this.environment.runner(type, runsOn, gpu?.provider ?? this.gpuCloudOf(input.projectId), input.boxCloud ?? null)
       return { ...input, runsOn, gpu }
     })
     const projects = inputs.map((input) => {
@@ -1349,6 +1359,7 @@ export class TaskManager {
       if (!input.title.trim()) throw new BadRequestError("title is required")
       if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
       if (input.boxSize && (input.runsOn !== "box" || !isBoxSize(input.boxSize))) throw new BadRequestError("boxSize needs runsOn box and a small, medium or large size")
+      if (input.boxCloud && (input.runsOn !== "box" || !isBoxPool(input.boxCloud))) throw new BadRequestError("boxCloud needs runsOn box and upstash or agent37")
       if (input.runsOn) this.requireIdentityRunner(project.id, input.runsOn)
       const cli = this.agentCliFor(input, project)
       if (cli === "opencode" && input.model && !isOpenCodeModel(input.model)) throw new BadRequestError("OpenCode models use provider/model or provider/model#variant; run opencode models on the runner.")
@@ -2366,11 +2377,12 @@ export class TaskManager {
   }
 
   /** Size for a new box made for a project: its own box size, else the size auto-sizing picked, else Settings → Worker size. */
-  newBoxSize(projectId?: string | null): BoxSize {
+  newBoxSize(projectId?: string | null, cloud: BoxPool | null = null): BoxSize {
     let size = (projectId ? (this.store.getProject(projectId)?.boxSize ?? this.autoSizeOf(projectId)) : null) ?? this.settings.get().workerSize
-    // Grow for the largest explicit task minimum in this queue; smaller tasks can use the same box.
+    // Grow for the largest explicit task minimum in this queue (on this cloud, when there's one); smaller tasks can use the same box.
     for (const id of this.wantsBox) {
       const row = this.store.getTaskRow(id)
+      if (row && cloud && this.wantedCloud(row) !== cloud) continue
       if (row && (!projectId || row.project_id === projectId) && isBoxSize(row.box_size) && compareSizes(row.box_size, size) > 0) size = row.box_size
     }
     return size
@@ -2441,7 +2453,7 @@ export class TaskManager {
    * or the global setting it falls back to. Tasks running at once and task folders kept per box follow each box's size unless Settings
    * or env set one number for every box.
    */
-  projectBoxSettings(p: Pick<Project, "id" | "boxSize" | "agentsPerBox" | "tasksPerBox" | "maxBoxes"> & { wholeMachine?: boolean }) {
+  projectBoxSettings(p: Pick<Project, "id" | "boxSize" | "agentsPerBox" | "tasksPerBox" | "maxBoxes"> & { wholeMachine?: boolean; boxCloud?: BoxPool | null }) {
     const s = this.settings.get()
     const o = this.settings.boxLimitOverrides()
     const global = (k: "slotsPerBox" | "maxResidentPerBox", label: string) =>
@@ -2449,6 +2461,7 @@ export class TaskManager {
     const own = (v: number | string) => `${v} (this project)`
     const used = this.projectBoxCap(p.id)?.used.size ?? 0
     return {
+      boxCloud: p.boxCloud ? own(BOX_POOL_LABEL[p.boxCloud]) : `global: new pool boxes come from ${BOX_POOL_LABEL[s.boxPool]} (Settings › Box providers)`,
       boxSize: p.boxSize ? own(p.boxSize) : this.autoSizeLine(p.id),
       agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its tasks at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Tasks running at once per box"),
       tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : (this.autoTasksPerBoxLine(p.id) ?? global("maxResidentPerBox", "Task folders kept per box")),
@@ -3083,7 +3096,8 @@ export class TaskManager {
         let id: string
         let made: Awaited<ReturnType<TaskManager["createFor"]>>
         try {
-          made = await this.createFor(owner, this.boxLabels(owner), r.to)
+          // The new box stays on the old one's cloud, so its tasks' choice of Agent37 or Upstash still holds.
+          made = await this.createFor(owner, this.boxLabels(owner), r.to, this.provider.pools ? boxCloudOf(old.provider) : null)
           id = made.id
           this.store.upsertBox({ id, provider: providerOf(this.provider, id).name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
         } catch (err) {
@@ -3693,19 +3707,21 @@ export class TaskManager {
    * else cold. A restore that fails makes the box cold instead, says so in the box history and warns the project's
    * Captain; a snapshot the provider no longer has is cleared. Throws only when the cold create fails too.
    */
-  private async createFor(projectId: string | null | undefined, labels: string[], size: BoxSize): Promise<{ id: string; from: ProjectSnapshot | null; cold: string | null }> {
+  private async createFor(projectId: string | null | undefined, labels: string[], size: BoxSize, cloud: BoxPool | null = null): Promise<{ id: string; from: ProjectSnapshot | null; cold: string | null }> {
     const project = projectId ? this.store.getProject(projectId) : null
     const snap = project && project.runner !== "local" ? project.snapshot : null
-    if (!project || !snap) return { id: await this.provider.create({ labels, size }), from: null, cold: null }
-    const skip = snapshotSkipReason(snap, size, this.provider.name)
-    if (skip) return { id: await this.provider.create({ labels, size }), from: null, cold: skip }
+    // Only a cloud asked for goes with the create: Settings decides otherwise.
+    const pool = cloud ? { pool: cloud } : {}
+    if (!project || !snap) return { id: await this.provider.create({ labels, size, ...pool }), from: null, cold: null }
+    const skip = snapshotSkipReason(snap, size, cloud ?? this.provider.name)
+    if (skip) return { id: await this.provider.create({ labels, size, ...pool }), from: null, cold: skip }
     try {
-      return { id: await this.provider.create({ labels, size, snapshotId: snap.id }), from: snap, cold: null }
+      return { id: await this.provider.create({ labels, size, snapshotId: snap.id, ...pool }), from: snap, cold: null }
     } catch (err) {
       const code = (err as { statusCode?: unknown } | null)?.statusCode
       const gone = code === 404 || code === 410
       console.warn(`[box-yard] couldn't start a box for ${project.name} from snapshot ${snap.id}: ${errorMessage(err)}`)
-      const id = await this.provider.create({ labels, size })
+      const id = await this.provider.create({ labels, size, ...pool })
       if (gone && this.store.getProject(project.id)?.snapshot?.id === snap.id) {
         const updated = this.store.setProjectSnapshot(project.id, null)
         if (updated) this.hub.broadcast({ type: "project", project: updated })
@@ -3871,34 +3887,50 @@ export class TaskManager {
 
     // Grow the pool: one new box per project per `slotsPerBox` tasks waiting for one, less the boxes already on
     // their way, so a batch never gets more boxes than it needs.
-    const perProject = new Map<string, number>()
+    // Tasks bound to one cloud ("agent37") grow the pool on that cloud, apart from their project's other tasks.
+    const perGroup = new Map<string, { projectId: string; cloud: BoxPool | null; n: number }>()
     const urgent = new Set<string>()
     for (const row of waiting) {
       if (!this.wantsBox.has(row.id)) continue
-      perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
+      const cloud = this.wantedCloud(row)
+      const key = growthKey(row.project_id, cloud)
+      const g = perGroup.get(key) ?? { projectId: row.project_id, cloud, n: 0 }
+      g.n++
+      perGroup.set(key, g)
       if (parsePriority(row.priority) === "high") urgent.add(row.project_id)
     }
     const need = new Map<string, number>()
-    for (const [projectId, n] of perProject) {
-      const creating = this.creatingFor.get(projectId) ?? 0
+    const groups = new Map<string, { projectId: string; cloud: BoxPool | null }>()
+    for (const [key, { projectId, cloud, n }] of perGroup) {
+      const creating = cloud ? (this.creatingFor.get(key) ?? 0) : (this.creatingFor.get(projectId) ?? 0) - this.creatingOnClouds(projectId)
       // Never past the project's own Max boxes, counting the boxes it uses and those on their way.
       const cap = this.projectBoxCap(projectId)
       const more = Math.min(Math.ceil(n / this.growthSlots(projectId)), cap ? cap.max - cap.used.size : Infinity) - creating
-      if (more > 0) need.set(projectId, more)
+      if (more > 0) {
+        need.set(key, more)
+        groups.set(key, { projectId, cloud })
+      }
     }
     // Several at once, up to Settings › Boxes created at once and the pace (each finished create runs another pass),
     // and up to the hour's free ones unless Cody allowed more. A project with a high-priority task waiting goes
     // first; then the one with the fewest boxes on their way, so one project's big fan-out doesn't hold up another's
     // single task. createBox counts itself in `creatingFor` and `createStarts` before its first await.
     const cap = this.createConcurrency()
-    const createRank = (projectId: string) => (urgent.has(projectId) ? 0 : 1_000_000) + (this.creatingFor.get(projectId) ?? 0)
-    while (need.size && this.fanoutRoom() > 0 && this.canCreateBox(cap)) {
-      const [projectId, more] = [...need].reduce((best, next) => (createRank(next[0]) < createRank(best[0]) ? next : best))
-      void this.createBox(projectId)
-      if (more > 1) need.set(projectId, more - 1)
-      else need.delete(projectId)
+    const createRank = (key: string) => {
+      const projectId = groups.get(key)!.projectId
+      return (urgent.has(projectId) ? 0 : 1_000_000) + (this.creatingFor.get(projectId) ?? 0)
     }
-    this.askForMoreBoxes(waiting, this.fanoutRoom() === 0 ? need : new Map())
+    while (need.size && this.fanoutRoom() > 0 && this.canCreateBox(cap)) {
+      const [key, more] = [...need].reduce((best, next) => (createRank(next[0]) < createRank(best[0]) ? next : best))
+      const { projectId, cloud } = groups.get(key)!
+      void this.createBox(projectId, cloud)
+      if (more > 1) need.set(key, more - 1)
+      else need.delete(key)
+    }
+    // The fan-out ask counts boxes per project, whichever cloud they're on.
+    const left = new Map<string, number>()
+    if (this.fanoutRoom() === 0) for (const [key, n] of need) left.set(groups.get(key)!.projectId, (left.get(groups.get(key)!.projectId) ?? 0) + n)
+    this.askForMoreBoxes(waiting, left)
   }
 
   /**
@@ -4144,6 +4176,13 @@ export class TaskManager {
           const moved = await this.leaveOtherCredsBox(row, box.id)
           if (moved !== "stay") return moved
         }
+        // Its task or project now runs on the other cloud (Agent37 ↔ Upstash): it moves between turns, once its
+        // workspace is safe elsewhere (archived, or all on GitHub), else it stays and says why.
+        const cloud = this.wantedCloud(row)
+        if (cloud && boxCloudOf(box.provider) && boxCloudOf(box.provider) !== cloud) {
+          const moved = await this.leaveOtherCloudBox(row, box.id, cloud)
+          if (moved !== "stay") return moved
+        }
         // Its box has no disk for the turn: it waits for the cleanup there, moves when its work is safe elsewhere,
         // or waits with the reason, rather than start (and fail) on a full disk again.
         const disk = await this.residentDisk(row, box.id)
@@ -4352,6 +4391,27 @@ export class TaskManager {
    * wall. It moves through `pickBox` like `leaveSmallBox` when nothing would be lost; one that can't stays ("stay")
    * and its log says why.
    */
+  /**
+   * A task whose box is on the other cloud than it (or its project) asks for now: it moves through `pickBox` to a box on
+   * its cloud, its workspace coming back from its archive there, when nothing would be lost; else it stays and its
+   * log says why once. Never mid-turn: placement only runs between turns.
+   */
+  private async leaveOtherCloudBox(row: TaskRow, boxId: string, cloud: BoxPool): Promise<string | null | "stay"> {
+    if (this.archiving.has(row.id)) return null
+    const why = `it runs on ${BOX_POOL_LABEL[cloud]} now (${isBoxPool(row.box_cloud) ? "its own runs_on" : "its project's box cloud"})`
+    const block = row.session_started ? this.moveBlock(row) : null
+    if (block) {
+      this.noteOnce(row.id, `${row.id}:${boxId}:cloud:${cloud}`, `Staying on ${boxId} though ${why}: it can't move safely (${block}).`)
+      return "stay"
+    }
+    const other = await this.pickBox(row.id, boxId)
+    if (!other) return null
+    this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+    void this.removeTaskDir(boxId, row.id).catch(() => {})
+    this.addEvent(row.id, `Moved from ${boxId} to ${other}: ${why}.`)
+    return this.assign(row.id, other)
+  }
+
   private async leaveOtherCredsBox(row: TaskRow, boxId: string): Promise<string | null | "stay"> {
     if (this.archiving.has(row.id)) return null
     const creds = this.projectCreds(row.project_id)
@@ -5575,6 +5635,27 @@ export class TaskManager {
    * (or new one) can take it.
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
+  /**
+   * The cloud a pool-box task's boxes must come from (docs/agent37.md): its own runs_on cloud ("agent37", "upstash"),
+   * else its project's, else its lineage's (a subtask stays on its root's cloud); null: any pool box, and Settings ›
+   * Box providers decides where new ones come from. Only when the provider makes more than one kind of pool box
+   * (`pools`): folders and test stand-ins have no clouds.
+   */
+  private wantedCloud(row: TaskRow, inherited?: EnvironmentType | null): BoxPool | null {
+    if (!this.provider.pools) return null
+    if (isBoxPool(row.box_cloud)) return row.box_cloud
+    const own = this.store.getProject(row.project_id)?.boxCloud
+    if (own) return own
+    if (inherited === undefined) {
+      try {
+        inherited = this.environment.inherited(row)
+      } catch {
+        inherited = null
+      }
+    }
+    return boxCloudOf(inherited)
+  }
+
   private async pickBox(taskId: string, exclude?: string, busyHere: Wait | null = null, waitHere: string | null = null): Promise<string | null> {
     this.pickedHow.delete(taskId)
     const row = this.store.getTaskRow(taskId)
@@ -5584,10 +5665,13 @@ export class TaskManager {
     const min = this.minBoxSize(projectId, row?.box_size)
     const cap = projectId ? this.projectBoxCap(projectId, taskId) : null
     const creds = projectId ? this.projectCreds(projectId) : GLOBAL_CREDENTIALS
+    // A task or project bound to one cloud ("agent37") only lands on that cloud's boxes, and only grows the pool there.
+    const cloud = row ? this.wantedCloud(row, inherited) : null
     const fitting = this.store
       .listBoxes()
       .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id) && sizeFits(b.size, min) && (!cap?.full || cap.used.has(b.id)))
       .filter((b) => !inherited || this.environment.physical(b.id) === inherited)
+      .filter((b) => !cloud || boxCloudOf(b.provider) === cloud)
     // The box wall: only boxes of its project's credential set.
     const walled = fitting.some((b) => this.boxCreds(b.id) !== creds)
     const candidates = fitting
@@ -5610,7 +5694,8 @@ export class TaskManager {
     // Boxes with a free slot that a project's Agents per box or memory rule out, why (the first one is the wait reason).
     const busy: Wait[] = busyHere ? [busyHere] : []
     // A new box may be made for it: the pool has room, and so does its project (its own Max boxes).
-    const canGrow = this.poolHasRoom() && !cap?.full && (!inherited || this.provider.name === inherited)
+    const cloudReady = !cloud || (this.provider.pools?.() ?? []).includes(cloud)
+    const canGrow = this.poolHasRoom() && !cap?.full && cloudReady && (cloud ? true : !inherited || this.provider.name === inherited)
     // How the box it lands on was picked: a new one made while it waited, or a slot beside another project.
     const how = (b: { id: string; rank: number }): BoxPick | null => (b.rank === 2 ? "shared" : this.madeFor.get(b.id)?.has(taskId) ? "new" : null)
     let reuseTried = false
@@ -5667,7 +5752,11 @@ export class TaskManager {
         return cleaned.id
       }
       // No box of the project's size has a free slot and the pool (or the project) can't grow.
-      if (inherited && this.provider.name !== inherited && !candidates.length) {
+      if (cloud && !cloudReady && !candidates.length) {
+        this.setWaitReason(taskId, `Waiting for an ${BOX_POOL_LABEL[cloud]} box: ${BOX_POOL_LABEL[cloud]} boxes aren't set up here (add its API key in Settings › Box providers), and this task runs only on ${BOX_POOL_LABEL[cloud]}`)
+        return null
+      }
+      if (inherited && !cloud && this.provider.name !== inherited && !candidates.length) {
         this.setWaitReason(taskId, `Subtask environment restriction: waiting for a ${inherited} placement; the active pool provider cannot create that type. No fallback is allowed.`)
         return null
       }
@@ -5708,12 +5797,13 @@ export class TaskManager {
     // A project at its own Max boxes waits for (or grows) one of its own boxes; a box on its way for another doesn't help.
     const cloud = own ? null : this.cloudBlock()
     const full = own ? `${this.store.getProjectName(row.project_id) ?? row.project_id} is at its limit of ${boxCount(own.max)}` : (cloud?.text ?? "the pool is full")
-    const pending = this.sizedBoxComing(min, own?.used)
+    const boxCloud = this.wantedCloud(row)
+    const pending = this.sizedBoxComing(min, own?.used, boxCloud)
     if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
     // Settings › Resize an idle box when no big-enough box is free (off by default): off, the task just waits.
     if (!this.settings.get().placementResizeEnabled) return this.setWaitReason(row.id, `${waitFor}: ${full} and none has room`, min)
     const creds = this.projectCreds(row.project_id)
-    const idle = this.idleBoxesBelow(min).filter((b) => (!own || own.used.has(b.id)) && this.boxCreds(b.id) === creds)
+    const idle = this.idleBoxesBelow(min).filter((b) => (!own || own.used.has(b.id)) && this.boxCreds(b.id) === creds && (!boxCloud || boxCloudOf(b.provider) === boxCloud))
     for (const box of idle) {
       const project = this.store.getProject(row.project_id)
       try {
@@ -5725,7 +5815,7 @@ export class TaskManager {
         console.warn(`[box-yard] couldn't resize idle box ${box.id} to ${min} for ${row.id}: ${errorMessage(err)}`)
         continue
       }
-      return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
+      return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min, undefined, boxCloud) ?? `resizing box ${box.id}`}`, min)
     }
     this.setWaitReason(row.id, `${waitFor}: ${full} and no box is idle to resize`, min, [], cloud?.fix ?? null)
   }
@@ -5734,11 +5824,12 @@ export class TaskManager {
    * A box of at least `size` on its way: being created, or a resize up to it running. Says which, or null. With
    * `only` (a project at its Max boxes), just a resize of one of those boxes counts.
    */
-  private sizedBoxComing(size: BoxSize, only?: Set<string>): string | null {
+  private sizedBoxComing(size: BoxSize, only?: Set<string>, cloud: BoxPool | null = null): string | null {
+    const onCloud = (provider: string | null | undefined) => !cloud || boxCloudOf(provider) === cloud
     // A migration's old box leaves the list before its resize is over, so the resizes are read on their own.
-    for (const r of this.resizes.values()) if (r.status === "running" && sizeFits(r.to, size) && (!only || only.has(r.boxId))) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
+    for (const r of this.resizes.values()) if (r.status === "running" && sizeFits(r.to, size) && (!only || only.has(r.boxId)) && onCloud(this.providerNameOf(r.boxId))) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
     if (only) return null
-    return this.store.listBoxes().some((b) => b.status === "creating" && sizeFits(b.size, size)) ? "a new one is being created" : null
+    return this.store.listBoxes().some((b) => b.status === "creating" && sizeFits(b.size, size) && onCloud(b.provider)) ? "a new one is being created" : null
   }
 
   /**
@@ -6414,21 +6505,31 @@ export class TaskManager {
     return ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
   }
 
-  private async createBox(projectId?: string) {
+  /** Boxes being made for a project on a named cloud (counted apart in `creatingFor` under growthKey). */
+  private creatingOnClouds(projectId: string): number {
+    return BOX_POOLS.reduce((n, cloud) => n + (this.creatingFor.get(growthKey(projectId, cloud)) ?? 0), 0)
+  }
+
+  private async createBox(projectId?: string, cloud: BoxPool | null = null) {
     this.creatingBoxes++
     this.poolCreates++
     this.createStarts.push(Date.now())
+    const group = projectId && cloud ? growthKey(projectId, cloud) : null
     if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
+    if (group) this.creatingFor.set(group, (this.creatingFor.get(group) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
-    const size = this.newBoxSize(projectId)
-    this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
+    const size = this.newBoxSize(projectId, cloud)
+    this.store.upsertBox({ id: placeholder, provider: cloud ?? this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
     this.emitBoxes()
     const project = projectId ? this.store.getProject(projectId) : null
     // The tasks that made the pool grow, for the history row.
-    const waiting = [...this.wantsBox].filter((id) => !projectId || this.store.getTaskRow(id)?.project_id === projectId)
+    const waiting = [...this.wantsBox].filter((id) => {
+      const row = this.store.getTaskRow(id)
+      return (!projectId || row?.project_id === projectId) && (!row || !cloud || this.wantedCloud(row) === cloud)
+    })
     try {
       const labels = this.boxLabels(projectId)
-      const made = await this.createFor(projectId, labels, size)
+      const made = await this.createFor(projectId, labels, size, cloud)
       const id = made.id
       this.store.removeBox(placeholder)
       this.store.upsertBox({ id, provider: providerOf(this.provider, id).name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
@@ -6442,7 +6543,7 @@ export class TaskManager {
         boxId: id,
         type: "created",
         actor: { kind: "scheduler" },
-        reason: project ? `Project ${project.name} needed a box for its tasks.` : "Tasks were waiting and the pool had room.",
+        reason: `${project ? `Project ${project.name} needed a box for its tasks` : "Tasks were waiting and the pool had room"}${cloud ? ` on ${BOX_POOL_LABEL[cloud]}` : ""}.`,
         detail: createdDetail(made, project?.name),
         taskIds: waiting,
       })
@@ -6467,10 +6568,11 @@ export class TaskManager {
     } finally {
       this.creatingBoxes--
       this.poolCreates--
-      if (projectId) {
-        const left = (this.creatingFor.get(projectId) ?? 1) - 1
-        if (left > 0) this.creatingFor.set(projectId, left)
-        else this.creatingFor.delete(projectId)
+      for (const key of [projectId, group]) {
+        if (!key) continue
+        const left = (this.creatingFor.get(key) ?? 1) - 1
+        if (left > 0) this.creatingFor.set(key, left)
+        else this.creatingFor.delete(key)
       }
       this.emitBoxes()
       this.schedule()
@@ -10054,6 +10156,7 @@ export class TaskManager {
       const event = this.history.add({
         ...input,
         boxName: input.boxName ?? input.boxId,
+        provider: input.provider ?? box?.provider ?? (input.boxId.startsWith("creating-") ? null : this.providerNameOf(input.boxId)),
         size: input.size !== undefined ? input.size : box ? normalizeBoxSize(box.size) : null,
         projects: input.projects ?? this.projectsOnBox(input.boxId).map(projectRef),
         taskIds: input.taskIds ?? this.store.listTaskRows({ boxId: input.boxId }).map((r) => r.id),
@@ -10062,6 +10165,15 @@ export class TaskManager {
       return event
     } catch (err) {
       console.warn(`[box-yard] box history: couldn't record ${input.type} of ${input.boxId}: ${errorMessage(err)}`)
+      return null
+    }
+  }
+
+  /** The provider a box id routes to, or null when none does (a removed SSH machine, an unknown id). */
+  private providerNameOf(boxId: string): string | null {
+    try {
+      return providerOf(this.provider, boxId).name
+    } catch {
       return null
     }
   }
@@ -10233,6 +10345,11 @@ function goneCleanup(boxId: string, reason: BoxCleanup["reason"]): BoxCleanup {
 }
 
 /** The created event's detail for a project's new box: from its snapshot, or cold despite one. */
+/** The key `creatingFor` counts a project's boxes on one cloud under (the project's own id counts them all). */
+function growthKey(projectId: string, cloud: BoxPool | null): string {
+  return cloud ? `${projectId}\u0000${cloud}` : projectId
+}
+
 function createdDetail(made: { from: ProjectSnapshot | null; cold: string | null }, projectName?: string): string | null {
   if (made.from) return `From ${projectName ?? "the project"}'s snapshot ${made.from.id}, taken from box ${made.from.boxId} (${made.from.size}).`
   return made.cold ? `Started cold: ${made.cold}.` : null

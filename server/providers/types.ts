@@ -1,4 +1,5 @@
 import type { UsageSource, WorkerSize } from "../../shared/types.js"
+import type { BoxPool } from "../../shared/agent37.js"
 
 export interface ExecResult {
   exitCode: number
@@ -64,7 +65,12 @@ export interface BoxProvider {
    * Create a worker box with Claude Code and git ready. Returns its id. With `snapshotId` the box starts from that
    * snapshot (Box.fromSnapshot) and throws when it can't; the caller decides whether to create it cold instead.
    */
-  create(opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }): Promise<string>
+  create(opts: CreateBoxOptions): Promise<string>
+  /**
+   * The clouds new pool boxes can come from right now (`create({ pool })`): Upstash, Agent37 or both, by which have a
+   * key. Unset: the provider makes one kind of box (folders, a fake in tests), and placement doesn't sort boxes by cloud.
+   */
+  pools?(): BoxPool[]
   health(boxId: string): Promise<BoxHealth>
   /** Wake a paused box. No-op when it is already running. */
   wake(boxId: string): Promise<void>
@@ -117,6 +123,14 @@ export interface BoxProvider {
   usage?(boxId: string): Promise<BoxUsageProbe>
   /** The provider that runs this box, when one provider fronts several (AutoProvider). */
   of?(boxId: string): BoxProvider
+}
+
+export interface CreateBoxOptions {
+  labels: string[]
+  size?: WorkerSize
+  snapshotId?: string
+  /** The cloud the box must come from (a task's or project's own choice, docs/agent37.md); unset: Settings'. */
+  pool?: BoxPool
 }
 
 /** The provider behind one box: its name, node and claude binaries can differ from the one new boxes come from. */

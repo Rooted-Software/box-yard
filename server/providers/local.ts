@@ -1,3 +1,4 @@
+import type { BoxPool } from "../../shared/agent37.js"
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
@@ -8,7 +9,7 @@ import { isDockerBox } from "../../shared/docker.js"
 import { isGpuBox } from "../../shared/runpod.js"
 import { isMachineBox } from "../../shared/machines.js"
 import { gpuBoxProvider } from "../../shared/gpu.js"
-import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
+import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, CreateBoxOptions, ExecResult } from "./types.js"
 import { TURN_SH } from "../turnProcess.js"
 
 /**
@@ -278,6 +279,7 @@ export class LocalRunnerRouter implements BoxProvider {
   readonly snapshot?: (boxId: string, name: string) => Promise<BoxSnapshotInfo>
   readonly deleteSnapshot?: (snapshotId: string) => Promise<void>
   readonly snapshotDirs?: (boxId: string) => { home: string; tmp: string }
+  readonly pools?: () => BoxPool[]
 
   constructor(
     readonly base: BoxProvider,
@@ -300,6 +302,7 @@ export class LocalRunnerRouter implements BoxProvider {
     if (base.snapshotDirs) this.snapshotDirs = (boxId) => base.snapshotDirs!(boxId)
     if (base.listIds) this.listIds = (label) => base.listIds!(label)
     if (base.liveIds) this.liveIds = () => base.liveIds!()
+    if (base.pools) this.pools = () => base.pools!()
   }
 
   of(boxId: string): BoxProvider {
@@ -361,7 +364,7 @@ export class LocalRunnerRouter implements BoxProvider {
     const p = this.of(boxId)
     return p.tasksRoot?.(boxId) ?? `${p.root(boxId)}/tasks`
   }
-  create(opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }) {
+  create(opts: CreateBoxOptions) {
     return this.base.create(opts)
   }
   health(boxId: string): Promise<BoxHealth> {

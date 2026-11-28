@@ -37,7 +37,7 @@ import { LocalProvider, LocalRunnerProvider, LocalRunnerRouter } from "./provide
 import { UpstashProvider } from "./providers/upstash.js"
 import { AutoProvider, type ActivePool } from "./providers/auto.js"
 import { Agent37Provider } from "./providers/agent37.js"
-import type { BoxPool } from "../shared/agent37.js"
+import { BOX_POOLS, type BoxPool } from "../shared/agent37.js"
 import type { BoxProvider } from "./providers/types.js"
 import { redact, type CredentialStore } from "./credentials.js"
 import { Setup, claudeLoginCheck, codexLoginCheck, type SetupDeps } from "./setup.js"
@@ -186,6 +186,8 @@ const schemas = {
     baseBranch: z.string().max(200).optional(),
     env: envSchema.optional(),
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
+    /** The cloud its pool boxes come from (docs/agent37.md); null follows Settings › Box providers. */
+    boxCloud: z.enum(BOX_POOLS).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
@@ -213,6 +215,8 @@ const schemas = {
     env: envSchema.optional(),
     removeEnv: z.array(z.string()).optional(),
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
+    /** The cloud its pool boxes come from (docs/agent37.md); null follows Settings › Box providers. */
+    boxCloud: z.enum(BOX_POOLS).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
@@ -252,6 +256,8 @@ const schemas = {
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
     boxSize: z.enum(BOX_SIZES).nullish(),
+    /** With runsOn "box": the cloud its boxes come from, over its project's (Task.boxCloud). */
+    boxCloud: z.enum(BOX_POOLS).nullish(),
     /** With runsOn "ssh": the machines' label or name (Task.machineLabel). */
     machineLabel: machineLabelSchema,
     /** With runsOn "gpu": its own cloud, and GPU, over Settings' Default GPU cloud (Task.gpu). */
@@ -265,6 +271,7 @@ const schemas = {
     attachments: attachmentIds,
     runsOn: z.enum(RUNNERS).optional(),
     boxSize: z.enum(BOX_SIZES).nullish(),
+    boxCloud: z.enum(BOX_POOLS).nullish(),
     machineLabel: machineLabelSchema,
     gpu: gpuPickSchema,
     /** Sent from the task's card in the Coordinator chat: the chat gets a line saying so (TaskManager.sentFromChat). */
@@ -659,7 +666,7 @@ export function createBoxYard(
     token: opts.github?.token ?? ((id) => c.mock ? null : tasks.githubToken(id) || null),
     fetch: opts.github?.fetch ?? (c.mock ? null : fetch),
   })
-  tasks.runnerProblem = (runner, key, cli, gpuCloud) => setup.runnerProblem(runner, key, cli, gpuCloud)
+  tasks.runnerProblem = (runner, key, cli, gpuCloud, boxCloud) => setup.runnerProblem(runner, key, cli, gpuCloud, boxCloud)
   // The chats' "@" list (server/runTargets.ts): the same runner checks and machines the task tools go by.
   const runTargetDeps: RunTargetDeps = {
     runnerProblem: (runner, gpuCloud) => setup.runnerProblem(runner, undefined, undefined, gpuCloud),
@@ -1168,7 +1175,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.machineLabel, body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.gpuProvider, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.machineLabel, body.boxSize, body.boxCloud, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.gpuProvider, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
     if (body.identityId !== undefined && body.identityId !== before?.identityId) hub.broadcast({ type: "identities", identities: identities.list() })
     // Done when its PR merges, turned on here: its resting tasks whose PR merged meanwhile move to done.
     if (body.autoDoneOnMerge !== undefined) tasks.doneMergedResting()
@@ -1469,7 +1476,7 @@ export function createBoxYard(
   api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
     // A runner that can't run fails here with the reason; it never falls back to the other one.
-    await tasks.requireRunner(tasks.newTaskRunner(body.runsOn, body.projectId), body.projectId, body.env, { agentCli: body.agentCli, model, machineLabel: body.machineLabel, gpu: body.gpu })
+    await tasks.requireRunner(tasks.newTaskRunner(body.runsOn, body.projectId), body.projectId, body.env, { agentCli: body.agentCli, model, machineLabel: body.machineLabel, gpu: body.gpu, boxCloud: body.boxCloud })
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -1497,7 +1504,7 @@ export function createBoxYard(
       return void res.json({ ...store.getTask(row.id), ownerCommand: true })
     }
     await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, { ...(row ? { agentCli: taskAgentCli(row) } : {}), machineLabel: body.machineLabel, gpu: body.gpu })
-    if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn, body.machineLabel, body.gpu, body.boxSize)
+    if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn, body.machineLabel, body.gpu, body.boxSize, body.boxCloud)
     const { task, inputId } = tasks.send(req.params.id!, body.content, "cody", files, undefined, undefined, body.id)
     orchestrator.directMessages.record({ taskId: task.id }, body.content)
     if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
