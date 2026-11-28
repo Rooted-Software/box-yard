@@ -43,6 +43,7 @@ export function workerSystemPrompt(input: {
   const vast = input.box?.gpu?.cloud === "vast"
   const daytona = input.box?.gpu?.cloud === "daytona"
   const docker = Boolean(input.box?.docker)
+  const agent37 = input.box?.cloud === "agent37"
   const machine = input.box?.machine
   const header = [
     machine
@@ -57,6 +58,8 @@ export function workerSystemPrompt(input: {
       ? `You are a Box Yard agent: a headless ${cli} worker running on a RunPod GPU pod of your project's own (Linux, as root).`
       : docker
       ? withOwner(`You are a Box Yard agent: a headless ${cli} worker running in an isolated Docker container of your project's own (Linux) on Cody's computer.`, input.ownerName)
+      : agent37
+      ? `You are a Box Yard agent: a headless ${cli} worker running in an isolated Agent37 box.`
       : `You are a Box Yard agent: a headless ${cli} worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
@@ -177,6 +180,8 @@ export interface BoxPromptInfo {
   docker?: { cpus: number | null }
   /** One of Cody's SSH machines (shared/machines.ts), from its last connection test. */
   machine?: { name: string; os: string | null; cpus: number | null }
+  /** A pool box's cloud (shared/agent37.ts): set for Agent37 boxes; unset means Upstash. */
+  cloud?: "agent37"
 }
 
 /** How much memory the box has and who may share it, so agents don't run test suites and headless browsers in parallel. */

@@ -44,7 +44,7 @@ You tell the **Coordinator** what you want. It sets up **projects** (with or wit
    Task manager: placement, queue, turns, archives, messaging
                   │ provider API / local exec / Docker exec / SSH
                   ▼
- Task worker (this computer, Upstash, Docker, SSH or GPU cloud)
+ Task worker (this computer, Upstash, Agent37, Docker, SSH or GPU cloud)
    tasks/<id>/work                  repo checkout or scratch folder
    tasks/<id>/{claude,codex,cursor,opencode} CLI sessions (move with the task)
    box-runner.mjs                  runs the selected task CLI + MCP

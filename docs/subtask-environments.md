@@ -1,6 +1,6 @@
 # Subtask environment inheritance
 
-Every task-spawned descendant stays in the original task's physical environment type. Docker descendants use Docker containers; Upstash descendants use Upstash boxes; Daytona descendants use Daytona sandboxes. New instances of the same type are allowed. Local tasks stay local and SSH tasks stay on SSH machines. SSH machine identity, user identity and GPU model do not define new types.
+Every task-spawned descendant stays in the original task's physical environment type. Docker descendants use Docker containers; Upstash descendants use Upstash boxes; Agent37 descendants use Agent37 boxes; Daytona descendants use Daytona sandboxes. New instances of the same type are allowed. Local tasks stay local and SSH tasks stay on SSH machines. SSH machine identity, user identity and GPU model do not define new types.
 
 RunPod and Vast.ai GPU boxes cannot spawn subtasks, including `same`, omitted/null runner choices, explicit runner requests and nested descendants. The server rejects worker events and direct manager creation with `Subtasks are not supported on RunPod GPU boxes.` or the corresponding Vast.ai message. The agent's system prompt and tool guidance tell it to explain this limitation when asked to use sub-agents and do the work itself. This decision does not disable intentional top-level RunPod/Vast.ai tasks. Existing compatible descendants may continue in their original type, but cannot create another generation. RunPod, Vast.ai and Daytona remain distinct physical types for lineage and placement checks.
 

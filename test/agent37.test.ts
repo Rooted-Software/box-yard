@@ -17,6 +17,8 @@ import { environmentRunner } from "../server/taskEnvironment.js"
 import { buildRunTargets } from "../shared/runTargets.js"
 import { resolveRunsOn } from "../shared/machines.js"
 import { FAKE_CLAUDE, testConfig, tmpDir } from "./helpers.js"
+import { workerSystemPrompt } from "../server/prompts.js"
+import type { Project } from "../shared/types.js"
 
 // Agent37 instances as pool boxes (docs/agent37.md). Nothing here talks to Agent37: every call goes to a fake transport
 // that keeps instances in memory and runs each exec in a shell on this machine, in a temporary folder that stands in
@@ -643,5 +645,21 @@ describe("the chat's @ list", () => {
       const tokens = buildRunTargets({ ...base, ...(boxClouds ? { boxClouds } : {}) }).map((t) => t.token)
       expect(tokens.some((t) => t.startsWith("agent37") || t.startsWith("upstash"))).toBe(false)
     }
+  })
+})
+
+describe("worker prompt on an Agent37 box", () => {
+  const project = { id: "prj_1", name: "Game", description: "" } as Project
+  const task = { id: "task_1", title: "T" }
+  const prompt = (cloud?: "agent37") => workerSystemPrompt({ project, task, branch: "b", port: 4000, box: { memoryBytes: 4 * 1024 ** 3, slots: 1, ...(cloud ? { cloud } : {}) } })
+
+  it("says Agent37, not Upstash", () => {
+    const p = prompt("agent37")
+    expect(p).toContain("worker running in an isolated Agent37 box.")
+    expect(p).not.toContain("Upstash Box")
+  })
+
+  it("is Upstash's when the cloud is unset", () => {
+    expect(prompt()).toContain("worker running in an isolated Upstash Box.")
   })
 })

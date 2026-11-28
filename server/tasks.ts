@@ -1,4 +1,4 @@
-import { BOX_POOLS, BOX_POOL_LABEL, boxCloudOf, isBoxPool, type BoxPool } from "../shared/agent37.js"
+import { BOX_POOLS, BOX_POOL_LABEL, boxCloudOf, isAgent37Box, isBoxPool, type BoxPool } from "../shared/agent37.js"
 import { OPENCODE_CREDENTIAL_VARS, OPENCODE_INSTALL, OPENCODE_LOGIN_HELP } from "./opencode.js"
 import fs from "node:fs"
 import os from "node:os"
@@ -5964,7 +5964,7 @@ export class TaskManager {
       const t = m?.lastTest
       return { memoryBytes: t?.memoryBytes ?? null, slots, alone, machine: { name: m?.name ?? machineOfBox(boxId), os: t?.osName || t?.os || null, cpus: t?.cpus ?? null } }
     }
-    return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots, alone }
+    return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots, alone, ...(isAgent37Box(boxId) ? { cloud: "agent37" as const } : {}) }
   }
 
   /** Settings → Boxes & limits → Memory and load: when placement skips a box. */
