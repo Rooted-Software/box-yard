@@ -179,9 +179,20 @@ export class Agent37Provider implements BoxProvider {
     if (inst.status === "starting" || inst.status === "waking" || inst.status === "restarting" || inst.status === "updating" || inst.status === "provisioning") await this.waitRunning(id, inst.status)
   }
 
+  /**
+   * Delete one of Box Yard's boxes. The workspace also holds instances other processes made: one without Box Yard's
+   * box metadata is refused, never deleted. Already gone is what was asked for.
+   */
   async destroy(boxId: string) {
+    const id = instanceId(boxId)
     try {
-      await this.api.deleteInstance(instanceId(boxId))
+      const inst = await this.api.getInstance(id).catch((err: unknown) => {
+        if (isGone(err)) return null
+        throw err
+      })
+      if (!inst || !isLive(inst)) return
+      if (inst.metadata?.[META_KIND] !== "box") throw new Error(`Agent37 instance ${id} isn't a Box Yard box; not deleting it`)
+      await this.api.deleteInstance(id)
     } catch (err) {
       // Already gone (deleted in Agent37's dashboard, or by an earlier try): that's what was asked for.
       if (!isGone(err)) throw err
@@ -210,10 +221,14 @@ export class Agent37Provider implements BoxProvider {
     return all.filter((i) => isLive(i) && i.metadata?.[META_KIND] === "box" && (i.metadata?.[META_LABELS] ?? "").includes(`,${label},`)).map((i) => boxIdOf(i.id))
   }
 
-  /** Every instance on the workspace, Box Yard's or not (snapshots left out), so a box deleted outside it is noticed. */
+  /**
+   * Box Yard's boxes on the workspace (its box metadata; snapshots left out), so a box deleted outside it is noticed.
+   * Instances other processes made never appear: the workspace isn't Box Yard's alone. A box of Box Yard's that this
+   * somehow misses is asked about on its own (health) before it's counted gone.
+   */
   async liveIds(): Promise<string[]> {
     const all = await this.api.listInstances()
-    return all.filter((i) => isLive(i) && i.metadata?.[META_KIND] !== "snapshot").map((i) => boxIdOf(i.id))
+    return all.filter((i) => isLive(i) && i.metadata?.[META_KIND] === "box").map((i) => boxIdOf(i.id))
   }
 
   // ---------------------------------------------------------------- snapshots

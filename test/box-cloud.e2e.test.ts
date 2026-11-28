@@ -182,7 +182,7 @@ describe("placement by cloud", () => {
     const p = await call<Project>(r, "POST", "/api/projects", { name: "nokey" })
     const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "a37", prompt: "hello", runsOn: "box", boxCloud: "agent37" })
     const row = await waitFor(() => r.yard.store.getTaskRow(t.id)?.wait_reason, "a wait reason")
-    expect(row).toMatch(/Waiting for an Agent37 box: Agent37 boxes aren't set up here/)
+    expect(row).toMatch(/Waiting for an Agent37 box: Agent37 boxes aren't set up: add an Agent37 API key in Settings › Box providers › Agent37 boxes, and this task runs only on Agent37/)
     expect(r.yard.store.getTaskRow(t.id)!.box_id).toBeNull()
     expect(r.agent37.creates).toHaveLength(0)
     // Its key arrives: it runs there.

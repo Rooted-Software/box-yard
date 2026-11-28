@@ -70,7 +70,7 @@ function packApp(): string {
 
 function envFile(boxId: string, password: string, publicUrl: string, keepAlive: boolean) {
   const keep = [
-    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "CODEX_AUTH_JSON", "CODEX_API_KEY", "UPSTASH_BOX_API_KEY", "WORKER_SNAPSHOT_ID", "WORKER_RUNTIME", "WORKER_SIZE",
+    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "CODEX_AUTH_JSON", "CODEX_API_KEY", "UPSTASH_BOX_API_KEY", "AGENT37_API_KEY", "AGENT37_TEMPLATE", "AGENT37_IDLE_SLEEP_SECONDS", "WORKER_SNAPSHOT_ID", "WORKER_RUNTIME", "WORKER_SIZE",
     "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "GITHUB_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL",
     "BOX_POOL_MAX", "BOX_CREATE_CONCURRENCY", "BOX_SLOTS", "BOX_MAX_RESIDENT", "BOX_IDLE_DELETE_MINUTES", "BOXYARD_WORKSPACE_RETENTION_DAYS", "BOXYARD_ARCHIVE_RETENTION_DAYS", "ORCHESTRATOR_MODEL", "WORKER_MODEL", "CAPTAIN_MODEL", "CAPTAIN_EFFORT",
     "BOXYARD_NOTES_MAX", "BOXYARD_NOTES_MAX_TOKENS",
@@ -79,7 +79,9 @@ function envFile(boxId: string, password: string, publicUrl: string, keepAlive: 
   ]
   const lines = keep.filter((k) => process.env[k]).map((k) => `${k}=${JSON.stringify(process.env[k])}`)
   lines.push(
-    `BOX_PROVIDER=upstash`,
+    // No BOX_PROVIDER: UPSTASH_BOX_API_KEY makes Upstash the default, and Settings › Box providers (or a task's or
+    // project's own cloud) can still pick Agent37. A pin here would keep Agent37 out (docs/agent37.md). Writing the
+    // whole .env drops the BOX_PROVIDER=upstash older deploys left.
     // Agents go to their own boxes, not into the server's box ("this computer" there).
     `BOXYARD_DEFAULT_RUNNER=${process.env.BOXYARD_DEFAULT_RUNNER || "box"}`,
     `PORT=3000`,
