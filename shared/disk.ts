@@ -146,6 +146,30 @@ export function isOutOfSpace(text: string | null | undefined): boolean {
   return /\bENOSPC\b|no space left on device|out of disk ?space|disk quota exceeded|\bEDQUOT\b|not enough (disk )?space|\bwrite error\b/i.test(text)
 }
 
+/**
+ * A work disk with less free than this is out of disk: a launch or turn that failed there failed for want of room,
+ * whatever its error says (Upstash's file API answers a full disk with "Failed to write file").
+ */
+export const OUT_OF_DISK_BYTES = 100 * 1024 * 1024
+
+/** Free room a turn in a workspace already on a box needs on top of what its folder may still grow by. */
+export const TURN_MIN_FREE_BYTES = 256 * 1024 * 1024
+
+/**
+ * "box b1 is out of disk (72 KB free of 30 GB)": how every error, wait and notice names a full box. A low root disk
+ * (/tmp, HOME on Upstash) is named too: "…; 80 MB free of 5.0 GB on the root disk (/tmp, home)".
+ */
+export function outOfDiskText(boxId: string, space?: { freeBytes: number; totalBytes: number; root?: { freeBytes: number; totalBytes: number } | null } | null): string {
+  if (!space) return `box ${boxId} is out of disk`
+  const root = space.root && rootLow(space.root) ? `; ${rootDiskLine({ rootFreeBytes: space.root.freeBytes, rootTotalBytes: space.root.totalBytes })}` : ""
+  return `box ${boxId} is out of disk (${diskLine({ freeBytes: space.freeBytes, totalBytes: space.totalBytes })}${root})`
+}
+
+/** Did a launch or turn on a box fail for want of disk: its error says so, or the box has under OUT_OF_DISK_BYTES free. */
+export function diskFailure(error: string | null | undefined, freeBytes: number | null | undefined): boolean {
+  return isOutOfSpace(error) || (typeof freeBytes === "number" && freeBytes < OUT_OF_DISK_BYTES)
+}
+
 export interface DiskPolicy {
   /** Never place a new workspace on a box with less free than this. */
   minFreeMb: number

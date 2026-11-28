@@ -160,6 +160,8 @@ export interface TurnFlags {
   oomRetries?: number
   /** A turn whose login hit its usage limit or was refused was retried on the next login (docs/logins.md); a second one fails as usual. */
   loginRetries?: number
+  /** A turn that ran out of disk on its box carried on after a cleanup there, or on another box; a second one fails as usual. */
+  diskRetries?: number
   /** Hooks whose prompts started this turn (their inputs were in it), so they don't fire on it again. */
   hookIds?: string[]
   /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
