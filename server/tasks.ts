@@ -805,8 +805,8 @@ export class TaskManager {
    * full free-space floor, else they move (when their work can) or wait with the reason (`residentDisk`).
    */
   private diskFull = new Map<string, string>()
-  /** `<task>:<box>` pairs whose wait for disk was already told to the Captain. */
-  private diskWaitNoted = new Set<string>()
+  /** Tasks whose wait for disk on a box was already told to the Captain, and that box; forgotten once a turn starts. */
+  private diskWaitNoted = new Map<string, string>()
   /** The last pushedCheck of a task waiting on a full box (`pushedVerdictOf`). */
   private pushedSeen = new Map<string, { boxId: string; activeAt: number; at: number; verdict: string }>()
   private lowDiskNoticeAt = new Map<string, number>()
@@ -4250,9 +4250,8 @@ export class TaskManager {
       return this.assign(row.id, other)
     }
     this.setWaitReason(row.id, `Waiting for disk space on ${boxId}: ${full}, cleanup couldn't free the ${needs} this task's turn needs, and its workspace can't move: ${block}`)
-    const key = `${row.id}:${boxId}`
-    if (!this.diskWaitNoted.has(key)) {
-      this.diskWaitNoted.add(key)
+    if (this.diskWaitNoted.get(row.id) !== boxId) {
+      this.diskWaitNoted.set(row.id, boxId)
       this.notice(
         `⚠️ **${row.title}** is waiting for disk: ${full} and cleanup couldn't free enough. Its workspace can't move (${block}). Free space on the box, or have its work pushed, and it starts again.`,
         { taskId: row.id },
@@ -6681,6 +6680,8 @@ export class TaskManager {
       if (this.store.subtaskRows(taskId).length) this.syncSubtasks(taskId)
       this.diskRetried.delete(taskId)
       this.diskFull.delete(taskId)
+      this.diskWaitNoted.delete(taskId)
+      this.pushedSeen.delete(taskId)
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
       // Hooks whose prompts are in this turn (a retried turn keeps the interrupted one's), so they don't fire on it.
