@@ -966,7 +966,7 @@ export class TaskManager {
       archive: (taskId) => this.archiveFresh(taskId),
       archiveProblem: (taskId) => this.archiveProblem(taskId),
       park: (taskId, boxId, note) => this.park(taskId, boxId, note),
-      dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
+      dropPushed: (taskId, boxId, why) => this.dropPushed(taskId, boxId, why),
       pushedOnGitHub: (taskId, boxId) => this.pushedOnGitHub(taskId, boxId),
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
@@ -6222,17 +6222,19 @@ export class TaskManager {
    * unpushed (the janitor checked), so GitHub has all of it. An older archive is let go too: the next message starts
    * from a recap of the task instead of an out-of-date session.
    */
-  private async dropPushed(taskId: string, boxId: string) {
+  private async dropPushed(taskId: string, boxId: string, why: "merged" | "pushed" = "merged") {
     const row = this.store.getTaskRow(taskId)
     if (!row) return
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [], archivePath: null, lastArchivedAt: null }, { touch: false })
-    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, "out of date; workspace removed after its PR merged")
+    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, why === "merged" ? "out of date; workspace removed after its PR merged" : "out of date; workspace removed with nothing unpushed")
     await this.removeTaskDir(boxId, taskId)
     const pr = prNumber(row.pr_url)
-    console.log(`[box-yard] removed workspace ${taskId} from ${boxId} without an archive: PR${pr ? ` #${pr}` : ""} merged, nothing unpushed`)
+    console.log(`[box-yard] removed workspace ${taskId} from ${boxId} without an archive: ${why === "merged" ? `PR${pr ? ` #${pr}` : ""} merged, ` : ""}nothing unpushed`)
     this.addEvent(
       taskId,
-      `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`,
+      why === "merged"
+        ? `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`
+        : `Workspace removed from box ${boxId} to free disk, without an archive: nothing in it was uncommitted, stashed or unpushed, so GitHub has all of it${row.branch ? ` (branch ${row.branch})` : ""}. The next message starts from a recap on a fresh checkout of its branch.`,
     )
     this.emitTask(taskId)
   }

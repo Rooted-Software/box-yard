@@ -15,6 +15,7 @@ import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js
 // box it made. Its error names the step and each task's own error.
 
 const MB = 1024 * 1024
+const GB = 1024 * MB
 const env = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" }
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe", env }).toString()
 const which = (bin: string) => execFileSync("bash", ["-c", `command -v ${bin}`]).toString().trim()
@@ -476,6 +477,87 @@ describe("archiving on a full disk", () => {
   })
 })
 
+describe("low-disk cleanup of fully pushed workspaces", () => {
+  it("takes failed and idle tasks' folders off the box once GitHub has all of them, and keeps any with unsaved work", async () => {
+    const r = await start({ maxBoxes: 1 })
+    const p = await repoProject(r, "alpha")
+    const failed = await restedTask(r, p.id, "failed, pushed")
+    const idle = await restedTask(r, p.id, "idle, pushed, archived")
+    const dirty = await restedTask(r, p.id, "idle with uncommitted work")
+    const unpushed = await restedTask(r, p.id, "failed with an unpushed commit")
+    const box = failed.boxId!
+    const work = (t: Task) => workDir(r, box, t.id)
+    for (const t of [failed, idle]) {
+      git(work(t), "add", "-A")
+      git(work(t), "commit", "-qm", "haiku")
+      git(work(t), "push", "-q", "origin", `HEAD:refs/heads/${t.branch}`)
+      git(work(t), "branch", "-q", "--set-upstream-to", `origin/${t.branch}`)
+    }
+    git(work(unpushed), "add", "-A")
+    git(work(unpushed), "commit", "-qm", "local only")
+    for (const t of [failed, unpushed]) r.yard.store.updateTask(t.id, { status: "failed", error: "Couldn't start the agent: Failed to write file" })
+    // The idle one's archive is fresh, the failed one's isn't: it leaves without one.
+    stale(r, failed.id)
+    r.provider.fill(box, 50 * MB)
+
+    const report = await r.yard.tasks.janitor.run(box, { reason: "low-disk", target: 100 * GB, parkBelow: 100 * GB })
+    const step = report.steps.find((s) => s.key === "pushed")!
+    expect(step.removed).toEqual([`${failed.id} (nothing unpushed)`, `${idle.id} (archived, nothing unpushed)`])
+    expect(r.yard.store.getTaskRow(failed.id)!.box_id).toBeNull()
+    expect(r.yard.store.getTaskRow(failed.id)!.archive_path).toBeNull()
+    expect(r.yard.tasks.resumeMode(failed.id)).toBe("recap")
+    expect(events(r, failed.id)).toContain(
+      `Workspace removed from box ${box} to free disk, without an archive: nothing in it was uncommitted, stashed or unpushed, so GitHub has all of it (branch ${failed.branch}). The next message starts from a recap on a fresh checkout of its branch.`,
+    )
+    expect(r.yard.store.getTaskRow(idle.id)!.box_id).toBeNull()
+    expect(r.yard.tasks.resumeMode(idle.id)).toBe("archive")
+    // Unsaved work stays where it is.
+    for (const t of [dirty, unpushed]) expect(r.yard.store.getTaskRow(t.id)!.box_id).toBe(box)
+    expect(git(work(unpushed), "log", "-1", "--format=%s").trim()).toBe("local only")
+    expect(fs.existsSync(path.join(work(dirty), "box-yard-demo.md"))).toBe(true)
+    // The box history names what went.
+    const history = await waitFor(() => r.yard.tasks.history.list({ boxId: box, type: "cleanup" })[0], "the cleanup in the box history")
+    expect(history.taskIds).toEqual(expect.arrayContaining([failed.id, idle.id]))
+  })
+
+  it("moves a task off a full box through GitHub when its archive can't carry it but nothing is unpushed", async () => {
+    const r = await start({ maxBoxes: 2, diskMinFreeMb: 500 })
+    const p = await repoProject(r, "alpha")
+    const t = await restedTask(r, p.id, "pushed by hand")
+    const box = t.boxId!
+    const work = workDir(r, box, t.id)
+    git(work, "add", "-A")
+    git(work, "commit", "-qm", "haiku")
+    git(work, "push", "-q", "origin", `HEAD:refs/heads/${t.branch}`)
+    git(work, "branch", "-q", "--set-upstream-to", `origin/${t.branch}`)
+    // Its archive is from before its last turn (a turn-end archive that failed, say), so it can't carry the task.
+    stale(r, t.id)
+    r.provider.fill(box, 50 * MB)
+    await r.yard.tasks.probeDisk(box, 0)
+    await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "one more haiku" })
+    const moved = await waitFor(async () => {
+      const x = await getTask(r, t.id)
+      return x.status === "idle" && x.boxId && x.boxId !== box && x.pendingCount === 0 ? x : null
+    }, "the task to carry on on another box")
+    expect(events(r, t.id).some((e) => e.startsWith(`Moved from ${box} to ${moved.boxId}: box ${box} is out of disk (`) && e.includes("starts there from a recap"))).toBe(true)
+    // The new box has its branch, commit included.
+    expect(git(workDir(r, moved.boxId!, t.id), "log", "--format=%s").split("\n")).toContain("haiku")
+    expect(fs.existsSync(r.yard.tasks.taskDir(box, t.id))).toBe(false)
+  })
+
+  it("leaves them alone while the box has room", async () => {
+    const r = await start({ maxBoxes: 1 })
+    const p = await repoProject(r, "alpha")
+    const t = await restedTask(r, p.id, "idle, pushed")
+    git(workDir(r, t.boxId!, t.id), "add", "-A")
+    git(workDir(r, t.boxId!, t.id), "commit", "-qm", "haiku")
+    git(workDir(r, t.boxId!, t.id), "push", "-q", "origin", `HEAD:refs/heads/${t.branch}`)
+    const report = await r.yard.tasks.janitor.run(t.boxId!, { reason: "manual", target: null, parkBelow: 100 * MB })
+    expect(report.steps.find((s) => s.key === "pushed")!.skipped).toBe("enough room without parking workspaces")
+    expect(r.yard.store.getTaskRow(t.id)!.box_id).toBe(t.boxId)
+  })
+})
+
 describe("emergency cleanup at 0 bytes free", () => {
   it("removes only done workspaces whose PR is merged and fully pushed, then the rest archive fine", async () => {
     const r = await start({ maxBoxes: 1 })
@@ -513,7 +595,7 @@ describe("emergency cleanup at 0 bytes free", () => {
 
     const report = await r.yard.tasks.janitor.run(box, { reason: "out-of-space", target: 100 * MB, parkBelow: 100 * MB })
     const step = (c: BoxCleanup, key: string) => c.steps.find((s) => s.key === key)!
-    expect(report.steps.map((s) => s.key)).toEqual(["temp", "merged", "tmp", "partials", "caches", "builds", "git", "archive"])
+    expect(report.steps.map((s) => s.key)).toEqual(["temp", "merged", "tmp", "partials", "caches", "builds", "git", "archive", "pushed"])
     expect(step(report, "temp").removed).toEqual(["session temp files of 1 task"])
     expect(fs.existsSync(path.join(dir(idle), "claude", "shell-snapshots"))).toBe(false)
     expect(fs.existsSync(path.join(dir(idle), "claude", "projects", "p", "s.jsonl"))).toBe(true)
@@ -557,7 +639,7 @@ describe("emergency cleanup at 0 bytes free", () => {
     r.yard.store.updateTask(t.id, { status: "done", prUrl: "https://github.com/o/r/pull/1", prState: "merged" })
     r.provider.fill(t.boxId!, 300 * MB)
     const report = await r.yard.tasks.janitor.run(t.boxId!, { reason: "low-disk", target: 400 * MB, parkBelow: 400 * MB })
-    expect(report.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
+    expect(report.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive", "pushed"])
     // Parked with its archive (the session stays), not dropped.
     expect(r.yard.store.getTaskRow(t.id)!.archive_path).toBeTruthy()
   })

@@ -4,7 +4,7 @@ import type { BoxProvider } from "./providers/types.js"
 import { providerOf, q } from "./providers/types.js"
 import { errorMessage } from "./util/retry.js"
 import { withOwner } from "../shared/owner.js"
-import { RESTING_STATUSES } from "../shared/types.js"
+import { RESTING_STATUSES, type TaskStatus } from "../shared/types.js"
 import { mirrorGcScript } from "./gitShare.js"
 import { readableIndexScript } from "./gitFirst.js"
 import { CLEANUP_STEPS, CLEAR_STEPS, EMERGENCY_FREE_BYTES, EMERGENCY_STEPS, formatBytes, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
@@ -166,8 +166,11 @@ export interface JanitorHost {
   archiveProblem(taskId: string): string
   /** Remove a resting task's folder from its box; it comes back from the archive on its next message. */
   park(taskId: string, boxId: string, note: string): Promise<void>
-  /** Remove a done task's folder without an archive (GitHub has all of it); it comes back from a recap. */
-  dropPushed(taskId: string, boxId: string): Promise<void>
+  /**
+   * Remove a resting task's folder without an archive (GitHub has all of it); it comes back from a recap. `why`: its PR
+   * is merged (the default), or its branch is just fully pushed.
+   */
+  dropPushed(taskId: string, boxId: string, why?: "merged" | "pushed"): Promise<void>
   /** A done task with a merged PR whose folder holds nothing GitHub lacks (pushedCheck), so it needs no archive to leave. */
   pushedOnGitHub(taskId: string, boxId: string): Promise<boolean>
   /** Repo mirror folder names (in .boxyard/repos) some task on the box still needs; with `owner`, also the box's own project's. */
@@ -235,6 +238,20 @@ export function clearOrder(rows: TaskRow[], boxId: string): TaskRow[] {
 /** Done tasks with a merged PR, whose folders may go without an archive once they hold nothing unpushed. Oldest first. */
 export function mergedOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string) => boolean): TaskRow[] {
   return parkOrder(rows, boxId, hasInputs).filter((r) => r.pr_state === "merged")
+}
+
+/**
+ * Statuses whose folder a low disk may take off the box once GitHub has all of it (nothing uncommitted, stashed or
+ * unpushed): the task carries on elsewhere from a recap, or from its archive when that's fresh. Never one mid-work or
+ * waiting for an answer (needs_input, waiting).
+ */
+export const PUSHED_STATUSES: TaskStatus[] = ["failed", "idle", "pr_ready", "done"]
+
+/** Resting tasks whose folders may leave once fully pushed: failed ones first, then least recently active. */
+export function pushedOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string) => boolean): TaskRow[] {
+  return rows
+    .filter((r) => r.box_id === boxId && !r.current_turn_id && PUSHED_STATUSES.includes(r.status) && !hasInputs(r.id))
+    .sort((a, b) => Number(b.status === "failed") - Number(a.status === "failed") || a.last_active_at - b.last_active_at)
 }
 
 export function parkOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string) => boolean): TaskRow[] {
@@ -422,7 +439,7 @@ export class BoxJanitor {
         entry.skipped = "enough room already"
         continue
       }
-      if (step.key === "archive" && free !== null && free >= (opts.target ?? opts.parkBelow)) {
+      if ((step.key === "archive" || step.key === "pushed") && free !== null && free >= (opts.target ?? opts.parkBelow)) {
         entry.skipped = "enough room without parking workspaces"
         continue
       }
@@ -623,6 +640,9 @@ export class BoxJanitor {
         return null
       }
 
+      case "pushed":
+        return this.dropFullyPushed(boxId, entry, exec, progress)
+
       case "archive": {
         if (opts.clear) return this.archiveAll(boxId, entry)
         const order = parkOrder(rows(), boxId, (id) => store.hasInputs(id))
@@ -645,6 +665,48 @@ export class BoxJanitor {
         return null
       }
     }
+  }
+
+  /**
+   * The low-disk step after parking done workspaces: a resting task's folder with nothing uncommitted, stashed or
+   * unpushed (pushedCheck) leaves the box: parked when its archive is fresh (the Claude session comes back with it),
+   * else removed, and its next message starts from a recap on a fresh checkout of its branch. One a process uses, or
+   * with anything GitHub lacks, stays.
+   */
+  private async dropFullyPushed(boxId: string, entry: CleanupStepReport, exec: (cmd: string) => Promise<string>, progress: () => Promise<boolean>): Promise<string | null> {
+    const { store } = this.host
+    const order = pushedOrder(store.listTaskRows(), boxId, (id) => store.hasInputs(id))
+    if (!order.length) return "no resting workspaces on this box"
+    const kept: string[] = []
+    for (const candidate of order) {
+      this.busy.add(candidate.id)
+      try {
+        // Re-checked under the busy mark: a turn may have started, or a message come in, meanwhile.
+        const row = store.getTaskRow(candidate.id)
+        if (!row || row.box_id !== boxId || row.current_turn_id || !PUSHED_STATUSES.includes(row.status) || store.hasInputs(row.id)) continue
+        const live = await this.host.inUse(boxId, row.id)
+        if (live.length) {
+          kept.push(`${row.id} (in use by ${live.join("; ")})`)
+          continue
+        }
+        const verdict = pushedVerdict(await exec(pushedCheck(`${this.host.taskDir(boxId, row.id)}/work`, row.id)))
+        if (verdict !== "yes") {
+          kept.push(`${row.id} (${verdict.replace(/^no /, "")})`)
+          continue
+        }
+        if (this.host.hasFreshArchive(row)) {
+          await this.host.park(row.id, boxId, `Workspace parked in the archive to free disk on box ${boxId}: nothing in it was unpushed. It comes back on the next message.`)
+          entry.removed.push(`${row.id} (archived, nothing unpushed)`)
+        } else {
+          await this.host.dropPushed(row.id, boxId, "pushed")
+          entry.removed.push(`${row.id} (nothing unpushed)`)
+        }
+      } finally {
+        this.busy.delete(candidate.id)
+      }
+      if (await progress()) break
+    }
+    return kept.length && !entry.removed.length ? `kept ${kept.join(", ")}` : null
   }
 
   /** Clear box's first step: archive each workspace that isn't running, then take it off the box. */

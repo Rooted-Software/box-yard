@@ -12,6 +12,7 @@ export const CLEANUP_STEPS = [
   { key: "builds", label: "node_modules and build output in resting tasks" },
   { key: "git", label: "git gc and unused repo mirrors" },
   { key: "archive", label: "Done workspaces parked in the archive" },
+  { key: "pushed", label: "Resting workspaces whose branch is fully pushed (failed, idle, ready or done tasks)" },
 ] as const
 
 /**

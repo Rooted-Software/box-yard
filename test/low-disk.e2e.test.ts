@@ -472,7 +472,7 @@ describe("box cleanup", () => {
     r.provider.fill(box, free)
     // Enough once the leftover folder and the done task's dependencies are gone.
     const first = await r.yard.tasks.janitor.run(box, { reason: "low-disk", target: free + 250 * MB, parkBelow: free + 250 * MB })
-    expect(first.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
+    expect(first.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive", "pushed"])
     const step = (c: BoxCleanup, key: string) => c.steps.find((s) => s.key === key)!
     expect(step(first, "tmp").skipped).toBe("no stale temp folders (a local box's /tmp is this machine's, so it's left alone)")
     expect(step(first, "partials").removed).toContain("task_gone (unknown task)")
